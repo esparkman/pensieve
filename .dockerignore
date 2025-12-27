@@ -1,0 +1,8 @@
+node_modules
+dist
+.pensieve
+*.sqlite
+.git
+.gitignore
+.DS_Store
+README.md

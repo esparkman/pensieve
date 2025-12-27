@@ -22,8 +22,57 @@ Pensieve provides persistent storage via SQLite that Claude can access through n
 
 ## Installation
 
+### Option 1: Clone and Build (Recommended)
+
 ```bash
+# Clone the repository
+git clone https://github.com/esparkman/pensieve.git ~/Development/pensieve
+cd ~/Development/pensieve
+
+# Install dependencies and build
+npm install
+npm run build
+
+# Add to Claude Code
 claude mcp add pensieve node ~/Development/pensieve/dist/index.js
+```
+
+### Option 2: npx (Coming Soon)
+
+Once published to npm:
+
+```bash
+claude mcp add pensieve npx @esparkman/pensieve
+```
+
+### Option 3: Docker
+
+```bash
+# Clone the repository
+git clone https://github.com/esparkman/pensieve.git
+cd pensieve
+
+# Build the Docker image
+docker build -t pensieve .
+
+# Add to Claude Code (mount your project for local database)
+claude mcp add pensieve docker run -i --rm \
+  -v "$PWD/.pensieve:/app/.pensieve" \
+  -v "$HOME/.claude-pensieve:/root/.claude-pensieve" \
+  pensieve
+```
+
+**Note:** The Docker approach mounts two volumes:
+- `$PWD/.pensieve` — Project-local database (if in a git repo)
+- `$HOME/.claude-pensieve` — Global fallback database
+
+### Verify Installation
+
+After installing, restart Claude Code and check that Pensieve is loaded:
+
+```bash
+# In a new Claude Code session, the tools should be available:
+# pensieve_status, pensieve_remember, pensieve_recall, etc.
 ```
 
 ## Usage
