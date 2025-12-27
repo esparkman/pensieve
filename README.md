@@ -22,7 +22,15 @@ Pensieve provides persistent storage via SQLite that Claude can access through n
 
 ## Installation
 
-### Option 1: Clone and Build (Recommended)
+### Option 1: npx (Recommended)
+
+```bash
+claude mcp add pensieve npx @esparkman/pensieve
+```
+
+That's it! Restart Claude Code and the tools are available.
+
+### Option 2: Clone and Build
 
 ```bash
 # Clone the repository
@@ -35,14 +43,6 @@ npm run build
 
 # Add to Claude Code
 claude mcp add pensieve node ~/Development/pensieve/dist/index.js
-```
-
-### Option 2: npx (Coming Soon)
-
-Once published to npm:
-
-```bash
-claude mcp add pensieve npx @esparkman/pensieve
 ```
 
 ### Option 3: Docker
