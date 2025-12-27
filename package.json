@@ -1,5 +1,5 @@
 {
-  "name": "@evansparkman/pensieve",
+  "name": "@esparkman/pensieve",
   "version": "0.1.0",
   "description": "Pensieve - persistent memory for Claude Code. Remember decisions, preferences, and context across sessions.",
   "type": "module",
