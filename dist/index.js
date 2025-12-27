@@ -1,0 +1,498 @@
+#!/usr/bin/env node
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, } from '@modelcontextprotocol/sdk/types.js';
+import { MemoryDatabase } from './database.js';
+// Initialize database
+const db = new MemoryDatabase();
+// Create MCP server
+const server = new Server({
+    name: 'memory-mcp',
+    version: '0.1.0',
+}, {
+    capabilities: {
+        tools: {},
+    },
+});
+// Define tools
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return {
+        tools: [
+            {
+                name: 'memory_remember',
+                description: 'Save a decision, preference, discovery, or entity to persistent memory. Use this to record important information that should persist across conversations.',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        type: {
+                            type: 'string',
+                            enum: ['decision', 'preference', 'discovery', 'entity', 'question'],
+                            description: 'The type of information to remember'
+                        },
+                        // For decisions
+                        topic: {
+                            type: 'string',
+                            description: 'Topic of the decision (e.g., "authentication", "styling")'
+                        },
+                        decision: {
+                            type: 'string',
+                            description: 'The decision that was made'
+                        },
+                        rationale: {
+                            type: 'string',
+                            description: 'Why this decision was made'
+                        },
+                        // For preferences
+                        category: {
+                            type: 'string',
+                            description: 'Category of preference (e.g., "coding_style", "testing")'
+                        },
+                        key: {
+                            type: 'string',
+                            description: 'Preference key'
+                        },
+                        value: {
+                            type: 'string',
+                            description: 'Preference value'
+                        },
+                        // For discoveries
+                        name: {
+                            type: 'string',
+                            description: 'Name of the discovered item'
+                        },
+                        location: {
+                            type: 'string',
+                            description: 'File path or location'
+                        },
+                        description: {
+                            type: 'string',
+                            description: 'Description of the item'
+                        },
+                        // For entities
+                        relationships: {
+                            type: 'string',
+                            description: 'JSON string of relationships (e.g., {"belongs_to": ["Tenant"], "has_many": ["Orders"]})'
+                        },
+                        attributes: {
+                            type: 'string',
+                            description: 'JSON string of key attributes'
+                        },
+                        // For questions
+                        question: {
+                            type: 'string',
+                            description: 'The question to record'
+                        },
+                        context: {
+                            type: 'string',
+                            description: 'Context for the question'
+                        }
+                    },
+                    required: ['type']
+                }
+            },
+            {
+                name: 'memory_recall',
+                description: 'Query the memory database to retrieve past decisions, preferences, discoveries, or entities. Use this to understand prior context.',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        query: {
+                            type: 'string',
+                            description: 'Search query to find relevant memories'
+                        },
+                        type: {
+                            type: 'string',
+                            enum: ['all', 'decisions', 'preferences', 'discoveries', 'entities', 'questions', 'session'],
+                            description: 'Type of memories to search (default: all)'
+                        },
+                        category: {
+                            type: 'string',
+                            description: 'Filter by category (for preferences or discoveries)'
+                        }
+                    }
+                }
+            },
+            {
+                name: 'memory_session_start',
+                description: 'Start a new session and load context from the last session. Call this at the beginning of a conversation to restore prior context.',
+                inputSchema: {
+                    type: 'object',
+                    properties: {}
+                }
+            },
+            {
+                name: 'memory_session_end',
+                description: 'End the current session and save a summary. Call this before ending a conversation to persist learnings.',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        summary: {
+                            type: 'string',
+                            description: 'Summary of what was accomplished this session'
+                        },
+                        work_in_progress: {
+                            type: 'string',
+                            description: 'Description of work that is still in progress'
+                        },
+                        next_steps: {
+                            type: 'string',
+                            description: 'Planned next steps for the next session'
+                        },
+                        key_files: {
+                            type: 'array',
+                            items: { type: 'string' },
+                            description: 'List of key files that were worked on'
+                        },
+                        tags: {
+                            type: 'array',
+                            items: { type: 'string' },
+                            description: 'Tags for categorizing this session'
+                        }
+                    },
+                    required: ['summary']
+                }
+            },
+            {
+                name: 'memory_resolve_question',
+                description: 'Mark an open question as resolved with the resolution.',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        question_id: {
+                            type: 'number',
+                            description: 'ID of the question to resolve'
+                        },
+                        resolution: {
+                            type: 'string',
+                            description: 'How the question was resolved'
+                        }
+                    },
+                    required: ['question_id', 'resolution']
+                }
+            },
+            {
+                name: 'memory_status',
+                description: 'Get the current memory status including database location and counts.',
+                inputSchema: {
+                    type: 'object',
+                    properties: {}
+                }
+            }
+        ]
+    };
+});
+// Handle tool calls
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+        switch (name) {
+            case 'memory_remember': {
+                const { type } = args;
+                switch (type) {
+                    case 'decision': {
+                        const { topic, decision, rationale } = args;
+                        if (!topic || !decision) {
+                            return { content: [{ type: 'text', text: 'Error: topic and decision are required for decisions' }] };
+                        }
+                        const id = db.addDecision({ topic, decision, rationale, source: 'user' });
+                        return {
+                            content: [{
+                                    type: 'text',
+                                    text: `✓ Remembered decision #${id}:\n  Topic: ${topic}\n  Decision: ${decision}${rationale ? `\n  Rationale: ${rationale}` : ''}`
+                                }]
+                        };
+                    }
+                    case 'preference': {
+                        const { category, key, value } = args;
+                        if (!category || !key || !value) {
+                            return { content: [{ type: 'text', text: 'Error: category, key, and value are required for preferences' }] };
+                        }
+                        db.setPreference({ category, key, value });
+                        return {
+                            content: [{
+                                    type: 'text',
+                                    text: `✓ Remembered preference:\n  ${category}/${key} = ${value}`
+                                }]
+                        };
+                    }
+                    case 'discovery': {
+                        const { category, name: itemName, location, description } = args;
+                        if (!category || !itemName) {
+                            return { content: [{ type: 'text', text: 'Error: category and name are required for discoveries' }] };
+                        }
+                        const id = db.addDiscovery({ category, name: itemName, location, description });
+                        return {
+                            content: [{
+                                    type: 'text',
+                                    text: `✓ Remembered discovery #${id}:\n  Category: ${category}\n  Name: ${itemName}${location ? `\n  Location: ${location}` : ''}${description ? `\n  Description: ${description}` : ''}`
+                                }]
+                        };
+                    }
+                    case 'entity': {
+                        const { name: entityName, description, relationships, attributes, location } = args;
+                        if (!entityName) {
+                            return { content: [{ type: 'text', text: 'Error: name is required for entities' }] };
+                        }
+                        db.upsertEntity({ name: entityName, description, relationships, attributes, location });
+                        return {
+                            content: [{
+                                    type: 'text',
+                                    text: `✓ Remembered entity: ${entityName}${description ? `\n  Description: ${description}` : ''}${relationships ? `\n  Relationships: ${relationships}` : ''}`
+                                }]
+                        };
+                    }
+                    case 'question': {
+                        const { question, context } = args;
+                        if (!question) {
+                            return { content: [{ type: 'text', text: 'Error: question is required' }] };
+                        }
+                        const id = db.addQuestion(question, context);
+                        return {
+                            content: [{
+                                    type: 'text',
+                                    text: `✓ Recorded open question #${id}:\n  ${question}${context ? `\n  Context: ${context}` : ''}`
+                                }]
+                        };
+                    }
+                    default:
+                        return { content: [{ type: 'text', text: `Error: Unknown type "${type}"` }] };
+                }
+            }
+            case 'memory_recall': {
+                const { query, type = 'all', category } = args;
+                let result = '';
+                if (type === 'session') {
+                    const session = db.getLastSession();
+                    if (session) {
+                        result = `## Last Session\n`;
+                        result += `Started: ${session.started_at}\n`;
+                        result += `Ended: ${session.ended_at || 'In progress'}\n`;
+                        if (session.summary)
+                            result += `\n**Summary:** ${session.summary}\n`;
+                        if (session.work_in_progress)
+                            result += `\n**Work in Progress:** ${session.work_in_progress}\n`;
+                        if (session.next_steps)
+                            result += `\n**Next Steps:** ${session.next_steps}\n`;
+                        if (session.key_files)
+                            result += `\n**Key Files:** ${session.key_files}\n`;
+                    }
+                    else {
+                        result = 'No previous sessions found.';
+                    }
+                }
+                else if (type === 'preferences') {
+                    const prefs = category ? db.getPreferencesByCategory(category) : db.getAllPreferences();
+                    if (prefs.length > 0) {
+                        result = `## Preferences${category ? ` (${category})` : ''}\n\n`;
+                        prefs.forEach(p => {
+                            result += `- **${p.category}/${p.key}:** ${p.value}${p.notes ? ` (${p.notes})` : ''}\n`;
+                        });
+                    }
+                    else {
+                        result = 'No preferences found.';
+                    }
+                }
+                else if (type === 'questions') {
+                    const questions = db.getOpenQuestions();
+                    if (questions.length > 0) {
+                        result = `## Open Questions\n\n`;
+                        questions.forEach(q => {
+                            result += `- [#${q.id}] ${q.question}${q.context ? ` (Context: ${q.context})` : ''}\n`;
+                        });
+                    }
+                    else {
+                        result = 'No open questions.';
+                    }
+                }
+                else if (type === 'entities') {
+                    const entities = db.getAllEntities();
+                    if (entities.length > 0) {
+                        result = `## Entities\n\n`;
+                        entities.forEach(e => {
+                            result += `### ${e.name}\n`;
+                            if (e.description)
+                                result += `${e.description}\n`;
+                            if (e.relationships)
+                                result += `Relationships: ${e.relationships}\n`;
+                            if (e.location)
+                                result += `Location: ${e.location}\n`;
+                            result += '\n';
+                        });
+                    }
+                    else {
+                        result = 'No entities found.';
+                    }
+                }
+                else if (query) {
+                    const searchResults = db.search(query);
+                    if (searchResults.decisions.length > 0) {
+                        result += `## Decisions matching "${query}"\n\n`;
+                        searchResults.decisions.forEach(d => {
+                            result += `- **${d.topic}:** ${d.decision}${d.rationale ? ` (${d.rationale})` : ''}\n`;
+                        });
+                        result += '\n';
+                    }
+                    if (searchResults.discoveries.length > 0) {
+                        result += `## Discoveries matching "${query}"\n\n`;
+                        searchResults.discoveries.forEach(d => {
+                            result += `- **${d.name}** [${d.category}]: ${d.description || 'No description'}${d.location ? ` at ${d.location}` : ''}\n`;
+                        });
+                        result += '\n';
+                    }
+                    if (searchResults.entities.length > 0) {
+                        result += `## Entities matching "${query}"\n\n`;
+                        searchResults.entities.forEach(e => {
+                            result += `- **${e.name}:** ${e.description || 'No description'}\n`;
+                        });
+                    }
+                    if (!result) {
+                        result = `No memories found matching "${query}"`;
+                    }
+                }
+                else {
+                    // Default: show recent decisions and preferences
+                    const decisions = db.getRecentDecisions(5);
+                    const prefs = db.getAllPreferences();
+                    if (decisions.length > 0) {
+                        result += `## Recent Decisions\n\n`;
+                        decisions.forEach(d => {
+                            result += `- **${d.topic}:** ${d.decision}\n`;
+                        });
+                        result += '\n';
+                    }
+                    if (prefs.length > 0) {
+                        result += `## Preferences\n\n`;
+                        prefs.forEach(p => {
+                            result += `- **${p.category}/${p.key}:** ${p.value}\n`;
+                        });
+                    }
+                    if (!result) {
+                        result = 'Memory is empty. Use memory_remember to start saving context.';
+                    }
+                }
+                return { content: [{ type: 'text', text: result }] };
+            }
+            case 'memory_session_start': {
+                const lastSession = db.getLastSession();
+                const currentSession = db.getCurrentSession();
+                // Start new session if none is active
+                let sessionId;
+                if (!currentSession) {
+                    sessionId = db.startSession();
+                }
+                else {
+                    sessionId = currentSession.id;
+                }
+                let result = `## Session Started (#${sessionId})\n\n`;
+                if (lastSession && lastSession.ended_at) {
+                    result += `### Previous Session\n`;
+                    result += `- **Date:** ${lastSession.started_at}\n`;
+                    if (lastSession.summary)
+                        result += `- **Summary:** ${lastSession.summary}\n`;
+                    if (lastSession.work_in_progress)
+                        result += `- **Work in Progress:** ${lastSession.work_in_progress}\n`;
+                    if (lastSession.next_steps)
+                        result += `- **Next Steps:** ${lastSession.next_steps}\n`;
+                    result += '\n';
+                }
+                const decisions = db.getRecentDecisions(5);
+                if (decisions.length > 0) {
+                    result += `### Key Decisions\n`;
+                    decisions.forEach(d => {
+                        result += `- **${d.topic}:** ${d.decision}\n`;
+                    });
+                    result += '\n';
+                }
+                const prefs = db.getAllPreferences();
+                if (prefs.length > 0) {
+                    result += `### Preferences\n`;
+                    prefs.forEach(p => {
+                        result += `- **${p.category}/${p.key}:** ${p.value}\n`;
+                    });
+                    result += '\n';
+                }
+                const questions = db.getOpenQuestions();
+                if (questions.length > 0) {
+                    result += `### Open Questions\n`;
+                    questions.forEach(q => {
+                        result += `- [#${q.id}] ${q.question}\n`;
+                    });
+                    result += '\n';
+                }
+                result += `---\nMemory database: ${db.getPath()}\n`;
+                result += `Ready to continue. What would you like to work on?`;
+                return { content: [{ type: 'text', text: result }] };
+            }
+            case 'memory_session_end': {
+                const { summary, work_in_progress, next_steps, key_files, tags } = args;
+                const currentSession = db.getCurrentSession();
+                if (!currentSession) {
+                    return {
+                        content: [{
+                                type: 'text',
+                                text: 'No active session found. Starting a new one and ending it immediately.'
+                            }]
+                    };
+                }
+                db.endSession(currentSession.id, summary, work_in_progress, next_steps, key_files, tags);
+                let result = `## Session Saved\n\n`;
+                result += `**Summary:** ${summary}\n`;
+                if (work_in_progress)
+                    result += `**Work in Progress:** ${work_in_progress}\n`;
+                if (next_steps)
+                    result += `**Next Steps:** ${next_steps}\n`;
+                if (key_files?.length)
+                    result += `**Key Files:** ${key_files.join(', ')}\n`;
+                if (tags?.length)
+                    result += `**Tags:** ${tags.join(', ')}\n`;
+                result += `\n---\nSession ended. Your context has been saved for next time.`;
+                return { content: [{ type: 'text', text: result }] };
+            }
+            case 'memory_resolve_question': {
+                const { question_id, resolution } = args;
+                db.resolveQuestion(question_id, resolution);
+                return {
+                    content: [{
+                            type: 'text',
+                            text: `✓ Question #${question_id} resolved: ${resolution}`
+                        }]
+                };
+            }
+            case 'memory_status': {
+                const decisions = db.getRecentDecisions(100);
+                const prefs = db.getAllPreferences();
+                const entities = db.getAllEntities();
+                const questions = db.getOpenQuestions();
+                const lastSession = db.getLastSession();
+                let result = `## Memory Status\n\n`;
+                result += `**Database:** ${db.getPath()}\n\n`;
+                result += `**Counts:**\n`;
+                result += `- Decisions: ${decisions.length}\n`;
+                result += `- Preferences: ${prefs.length}\n`;
+                result += `- Entities: ${entities.length}\n`;
+                result += `- Open Questions: ${questions.length}\n`;
+                result += `- Last Session: ${lastSession ? lastSession.started_at : 'None'}\n`;
+                return { content: [{ type: 'text', text: result }] };
+            }
+            default:
+                return {
+                    content: [{ type: 'text', text: `Unknown tool: ${name}` }]
+                };
+        }
+    }
+    catch (error) {
+        return {
+            content: [{
+                    type: 'text',
+                    text: `Error: ${error instanceof Error ? error.message : String(error)}`
+                }]
+        };
+    }
+});
+// Start server
+async function main() {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error('Memory MCP server running on stdio');
+}
+main().catch(console.error);
