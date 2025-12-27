@@ -7,7 +7,7 @@ import { MemoryDatabase } from './database.js';
 const db = new MemoryDatabase();
 // Create MCP server
 const server = new Server({
-    name: 'memory-mcp',
+    name: 'pensieve',
     version: '0.1.0',
 }, {
     capabilities: {
@@ -19,7 +19,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
         tools: [
             {
-                name: 'memory_remember',
+                name: 'pensieve_remember',
                 description: 'Save a decision, preference, discovery, or entity to persistent memory. Use this to record important information that should persist across conversations.',
                 inputSchema: {
                     type: 'object',
@@ -91,7 +91,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 }
             },
             {
-                name: 'memory_recall',
+                name: 'pensieve_recall',
                 description: 'Query the memory database to retrieve past decisions, preferences, discoveries, or entities. Use this to understand prior context.',
                 inputSchema: {
                     type: 'object',
@@ -113,7 +113,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 }
             },
             {
-                name: 'memory_session_start',
+                name: 'pensieve_session_start',
                 description: 'Start a new session and load context from the last session. Call this at the beginning of a conversation to restore prior context.',
                 inputSchema: {
                     type: 'object',
@@ -121,7 +121,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 }
             },
             {
-                name: 'memory_session_end',
+                name: 'pensieve_session_end',
                 description: 'End the current session and save a summary. Call this before ending a conversation to persist learnings.',
                 inputSchema: {
                     type: 'object',
@@ -153,7 +153,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 }
             },
             {
-                name: 'memory_resolve_question',
+                name: 'pensieve_resolve_question',
                 description: 'Mark an open question as resolved with the resolution.',
                 inputSchema: {
                     type: 'object',
@@ -171,7 +171,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 }
             },
             {
-                name: 'memory_status',
+                name: 'pensieve_status',
                 description: 'Get the current memory status including database location and counts.',
                 inputSchema: {
                     type: 'object',
@@ -186,7 +186,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     try {
         switch (name) {
-            case 'memory_remember': {
+            case 'pensieve_remember': {
                 const { type } = args;
                 switch (type) {
                     case 'decision': {
@@ -258,7 +258,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         return { content: [{ type: 'text', text: `Error: Unknown type "${type}"` }] };
                 }
             }
-            case 'memory_recall': {
+            case 'pensieve_recall': {
                 const { query, type = 'all', category } = args;
                 let result = '';
                 if (type === 'session') {
@@ -372,7 +372,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 }
                 return { content: [{ type: 'text', text: result }] };
             }
-            case 'memory_session_start': {
+            case 'pensieve_session_start': {
                 const lastSession = db.getLastSession();
                 const currentSession = db.getCurrentSession();
                 // Start new session if none is active
@@ -423,7 +423,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 result += `Ready to continue. What would you like to work on?`;
                 return { content: [{ type: 'text', text: result }] };
             }
-            case 'memory_session_end': {
+            case 'pensieve_session_end': {
                 const { summary, work_in_progress, next_steps, key_files, tags } = args;
                 const currentSession = db.getCurrentSession();
                 if (!currentSession) {
@@ -448,7 +448,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 result += `\n---\nSession ended. Your context has been saved for next time.`;
                 return { content: [{ type: 'text', text: result }] };
             }
-            case 'memory_resolve_question': {
+            case 'pensieve_resolve_question': {
                 const { question_id, resolution } = args;
                 db.resolveQuestion(question_id, resolution);
                 return {
@@ -458,7 +458,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         }]
                 };
             }
-            case 'memory_status': {
+            case 'pensieve_status': {
                 const decisions = db.getRecentDecisions(100);
                 const prefs = db.getAllPreferences();
                 const entities = db.getAllEntities();
@@ -493,6 +493,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error('Memory MCP server running on stdio');
+    console.error('Pensieve server running on stdio');
 }
 main().catch(console.error);

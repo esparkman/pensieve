@@ -1,11 +1,11 @@
 {
-  "name": "@evansparkman/memory-mcp",
+  "name": "@evansparkman/pensieve",
   "version": "0.1.0",
-  "description": "Persistent memory MCP server for Claude Code - remember decisions, preferences, and context across sessions",
+  "description": "Pensieve - persistent memory for Claude Code. Remember decisions, preferences, and context across sessions.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "memory-mcp": "./dist/index.js"
+    "pensieve": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
@@ -16,6 +16,7 @@
   "keywords": [
     "mcp",
     "claude",
+    "pensieve",
     "memory",
     "context",
     "ai"

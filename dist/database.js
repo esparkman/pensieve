@@ -19,10 +19,10 @@ export class MemoryDatabase {
     }
     getDbPath() {
         // Try project-local first, then fall back to home directory
-        const localPath = join(this.projectPath, '.memory', 'memory.sqlite');
-        const globalPath = join(homedir(), '.claude-memory', 'memory.sqlite');
-        // If local .memory directory exists or we're in a git repo, use local
-        if (existsSync(join(this.projectPath, '.memory')) ||
+        const localPath = join(this.projectPath, '.pensieve', 'memory.sqlite');
+        const globalPath = join(homedir(), '.claude-pensieve', 'memory.sqlite');
+        // If local .pensieve directory exists or we're in a git repo, use local
+        if (existsSync(join(this.projectPath, '.pensieve')) ||
             existsSync(join(this.projectPath, '.git'))) {
             return localPath;
         }
