@@ -1,3 +1,12 @@
+export declare const LIMITS: {
+    readonly MAX_DECISIONS: 1000;
+    readonly MAX_DISCOVERIES: 500;
+    readonly MAX_ENTITIES: 200;
+    readonly MAX_QUESTIONS: 100;
+    readonly MAX_SESSIONS: 100;
+    readonly SESSION_RETENTION_DAYS: 90;
+    readonly MAX_FIELD_LENGTH: 10000;
+};
 export interface Decision {
     id?: number;
     topic: string;
@@ -58,6 +67,14 @@ export declare class MemoryDatabase {
     private projectPath;
     constructor(projectPath?: string);
     private getDbPath;
+    /**
+     * Truncate a string to the maximum field length
+     */
+    private truncateField;
+    /**
+     * Prune old entries when limits are exceeded
+     */
+    private pruneIfNeeded;
     private initSchema;
     addDecision(decision: Decision): number;
     searchDecisions(query: string): Decision[];

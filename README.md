@@ -106,6 +106,44 @@ Pensieve stores data in SQLite:
 
 This means each project gets its own memory, but you also have a global memory for general preferences.
 
+### Environment Variable Override
+
+Set `PENSIEVE_DB_PATH` to explicitly specify the database location:
+
+```bash
+PENSIEVE_DB_PATH=/custom/path/memory.sqlite claude mcp add pensieve ...
+```
+
+## Security
+
+### Secrets Detection
+
+Pensieve automatically detects and **refuses to store** potential secrets including:
+- API keys (AWS, GitHub, Stripe, etc.)
+- Database connection strings with passwords
+- Bearer tokens and private keys
+- Credit card numbers and SSNs
+
+If a secret is detected, the data is NOT saved and a warning is displayed.
+
+### Storage Limits
+
+To prevent unbounded growth:
+- **Decisions**: Max 1,000 (oldest auto-pruned)
+- **Discoveries**: Max 500 (oldest auto-pruned)
+- **Sessions**: Older than 90 days auto-deleted
+- **Field length**: Max 10KB per field (truncated with warning)
+
+### Data Storage
+
+Data is stored in plaintext SQLite. Do NOT store:
+- Passwords or API keys
+- Personal identifying information
+- Financial credentials
+- Any sensitive secrets
+
+The database is local-only and never transmitted over the network.
+
 ## Tools Reference
 
 | Tool | Purpose |

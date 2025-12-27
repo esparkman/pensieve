@@ -3,6 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, } from '@modelcontextprotocol/sdk/types.js';
 import { MemoryDatabase } from './database.js';
+import { checkFieldsForSecrets, formatSecretWarning } from './security.js';
 // Initialize database
 const db = new MemoryDatabase();
 // Create MCP server
@@ -194,6 +195,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         if (!topic || !decision) {
                             return { content: [{ type: 'text', text: 'Error: topic and decision are required for decisions' }] };
                         }
+                        // Check for secrets
+                        const secretCheck = checkFieldsForSecrets({ topic, decision, rationale });
+                        if (secretCheck.containsSecret) {
+                            return { content: [{ type: 'text', text: formatSecretWarning(secretCheck) }] };
+                        }
                         const id = db.addDecision({ topic, decision, rationale, source: 'user' });
                         return {
                             content: [{
@@ -206,6 +212,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         const { category, key, value } = args;
                         if (!category || !key || !value) {
                             return { content: [{ type: 'text', text: 'Error: category, key, and value are required for preferences' }] };
+                        }
+                        // Check for secrets
+                        const secretCheck = checkFieldsForSecrets({ category, key, value });
+                        if (secretCheck.containsSecret) {
+                            return { content: [{ type: 'text', text: formatSecretWarning(secretCheck) }] };
                         }
                         db.setPreference({ category, key, value });
                         return {
@@ -220,6 +231,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         if (!category || !itemName) {
                             return { content: [{ type: 'text', text: 'Error: category and name are required for discoveries' }] };
                         }
+                        // Check for secrets
+                        const secretCheck = checkFieldsForSecrets({ category, name: itemName, location, description });
+                        if (secretCheck.containsSecret) {
+                            return { content: [{ type: 'text', text: formatSecretWarning(secretCheck) }] };
+                        }
                         const id = db.addDiscovery({ category, name: itemName, location, description });
                         return {
                             content: [{
@@ -233,6 +249,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         if (!entityName) {
                             return { content: [{ type: 'text', text: 'Error: name is required for entities' }] };
                         }
+                        // Check for secrets
+                        const secretCheck = checkFieldsForSecrets({ name: entityName, description, relationships, attributes, location });
+                        if (secretCheck.containsSecret) {
+                            return { content: [{ type: 'text', text: formatSecretWarning(secretCheck) }] };
+                        }
                         db.upsertEntity({ name: entityName, description, relationships, attributes, location });
                         return {
                             content: [{
@@ -245,6 +266,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         const { question, context } = args;
                         if (!question) {
                             return { content: [{ type: 'text', text: 'Error: question is required' }] };
+                        }
+                        // Check for secrets
+                        const secretCheck = checkFieldsForSecrets({ question, context });
+                        if (secretCheck.containsSecret) {
+                            return { content: [{ type: 'text', text: formatSecretWarning(secretCheck) }] };
                         }
                         const id = db.addQuestion(question, context);
                         return {

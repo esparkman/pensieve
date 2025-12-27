@@ -2,6 +2,16 @@ import Database from 'better-sqlite3';
 import { existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
+// Configuration limits
+export const LIMITS = {
+    MAX_DECISIONS: 1000,
+    MAX_DISCOVERIES: 500,
+    MAX_ENTITIES: 200,
+    MAX_QUESTIONS: 100,
+    MAX_SESSIONS: 100,
+    SESSION_RETENTION_DAYS: 90,
+    MAX_FIELD_LENGTH: 10000, // 10KB per field
+};
 export class MemoryDatabase {
     db;
     projectPath;
@@ -18,15 +28,73 @@ export class MemoryDatabase {
         this.initSchema();
     }
     getDbPath() {
+        // Check for explicit environment variable override first
+        const envPath = process.env.PENSIEVE_DB_PATH;
+        if (envPath) {
+            console.error(`[Pensieve] Using database from PENSIEVE_DB_PATH: ${envPath}`);
+            return envPath;
+        }
         // Try project-local first, then fall back to home directory
         const localPath = join(this.projectPath, '.pensieve', 'memory.sqlite');
         const globalPath = join(homedir(), '.claude-pensieve', 'memory.sqlite');
         // If local .pensieve directory exists or we're in a git repo, use local
         if (existsSync(join(this.projectPath, '.pensieve')) ||
             existsSync(join(this.projectPath, '.git'))) {
+            console.error(`[Pensieve] Using project-local database: ${localPath}`);
             return localPath;
         }
+        console.error(`[Pensieve] Using global database: ${globalPath}`);
         return globalPath;
+    }
+    /**
+     * Truncate a string to the maximum field length
+     */
+    truncateField(value, fieldName) {
+        if (!value)
+            return null;
+        if (value.length <= LIMITS.MAX_FIELD_LENGTH)
+            return value;
+        console.error(`[Pensieve] Warning: Truncating ${fieldName || 'field'} from ${value.length} to ${LIMITS.MAX_FIELD_LENGTH} chars`);
+        return value.substring(0, LIMITS.MAX_FIELD_LENGTH) + '... [truncated]';
+    }
+    /**
+     * Prune old entries when limits are exceeded
+     */
+    pruneIfNeeded() {
+        // Prune old sessions beyond retention period
+        this.db.prepare(`
+      DELETE FROM sessions
+      WHERE ended_at IS NOT NULL
+      AND datetime(ended_at) < datetime('now', '-${LIMITS.SESSION_RETENTION_DAYS} days')
+    `).run();
+        // Prune excess decisions (keep most recent)
+        const decisionCount = this.db.prepare('SELECT COUNT(*) as count FROM decisions').get().count;
+        if (decisionCount > LIMITS.MAX_DECISIONS) {
+            const excess = decisionCount - LIMITS.MAX_DECISIONS;
+            this.db.prepare(`
+        DELETE FROM decisions WHERE id IN (
+          SELECT id FROM decisions ORDER BY decided_at ASC LIMIT ?
+        )
+      `).run(excess);
+            console.error(`[Pensieve] Pruned ${excess} old decisions`);
+        }
+        // Prune excess discoveries
+        const discoveryCount = this.db.prepare('SELECT COUNT(*) as count FROM discoveries').get().count;
+        if (discoveryCount > LIMITS.MAX_DISCOVERIES) {
+            const excess = discoveryCount - LIMITS.MAX_DISCOVERIES;
+            this.db.prepare(`
+        DELETE FROM discoveries WHERE id IN (
+          SELECT id FROM discoveries ORDER BY discovered_at ASC LIMIT ?
+        )
+      `).run(excess);
+            console.error(`[Pensieve] Pruned ${excess} old discoveries`);
+        }
+        // Prune resolved questions older than 30 days
+        this.db.prepare(`
+      DELETE FROM open_questions
+      WHERE status = 'resolved'
+      AND datetime(resolved_at) < datetime('now', '-30 days')
+    `).run();
     }
     initSchema() {
         this.db.exec(`
@@ -109,11 +177,12 @@ export class MemoryDatabase {
     }
     // Decision methods
     addDecision(decision) {
+        this.pruneIfNeeded();
         const stmt = this.db.prepare(`
       INSERT INTO decisions (topic, decision, rationale, alternatives, source)
       VALUES (?, ?, ?, ?, ?)
     `);
-        const result = stmt.run(decision.topic, decision.decision, decision.rationale || null, decision.alternatives || null, decision.source || 'user');
+        const result = stmt.run(this.truncateField(decision.topic, 'topic'), this.truncateField(decision.decision, 'decision'), this.truncateField(decision.rationale, 'rationale'), this.truncateField(decision.alternatives, 'alternatives'), decision.source || 'user');
         return result.lastInsertRowid;
     }
     searchDecisions(query) {
@@ -140,7 +209,7 @@ export class MemoryDatabase {
       INSERT OR REPLACE INTO preferences (category, key, value, notes, updated_at)
       VALUES (?, ?, ?, ?, datetime('now'))
     `);
-        stmt.run(pref.category, pref.key, pref.value, pref.notes || null);
+        stmt.run(this.truncateField(pref.category, 'category'), this.truncateField(pref.key, 'key'), this.truncateField(pref.value, 'value'), this.truncateField(pref.notes, 'notes'));
     }
     getPreference(category, key) {
         const stmt = this.db.prepare(`
@@ -162,11 +231,12 @@ export class MemoryDatabase {
     }
     // Discovery methods
     addDiscovery(discovery) {
+        this.pruneIfNeeded();
         const stmt = this.db.prepare(`
       INSERT INTO discoveries (category, name, location, description, metadata, confidence)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
-        const result = stmt.run(discovery.category, discovery.name, discovery.location || null, discovery.description || null, discovery.metadata || null, discovery.confidence || 1.0);
+        const result = stmt.run(this.truncateField(discovery.category, 'category'), this.truncateField(discovery.name, 'name'), this.truncateField(discovery.location, 'location'), this.truncateField(discovery.description, 'description'), this.truncateField(discovery.metadata, 'metadata'), discovery.confidence || 1.0);
         return result.lastInsertRowid;
     }
     searchDiscoveries(query) {
@@ -191,7 +261,7 @@ export class MemoryDatabase {
       INSERT OR REPLACE INTO entities (name, description, relationships, attributes, location, updated_at)
       VALUES (?, ?, ?, ?, ?, datetime('now'))
     `);
-        stmt.run(entity.name, entity.description || null, entity.relationships || null, entity.attributes || null, entity.location || null);
+        stmt.run(this.truncateField(entity.name, 'name'), this.truncateField(entity.description, 'description'), this.truncateField(entity.relationships, 'relationships'), this.truncateField(entity.attributes, 'attributes'), this.truncateField(entity.location, 'location'));
     }
     getEntity(name) {
         const stmt = this.db.prepare(`SELECT * FROM entities WHERE name = ?`);
@@ -208,6 +278,7 @@ export class MemoryDatabase {
         return result.lastInsertRowid;
     }
     endSession(sessionId, summary, workInProgress, nextSteps, keyFiles, tags) {
+        this.pruneIfNeeded();
         const stmt = this.db.prepare(`
       UPDATE sessions
       SET ended_at = datetime('now'),
@@ -218,7 +289,7 @@ export class MemoryDatabase {
           tags = ?
       WHERE id = ?
     `);
-        stmt.run(summary, workInProgress || null, nextSteps || null, keyFiles ? JSON.stringify(keyFiles) : null, tags ? tags.join(',') : null, sessionId);
+        stmt.run(this.truncateField(summary, 'summary'), this.truncateField(workInProgress, 'work_in_progress'), this.truncateField(nextSteps, 'next_steps'), keyFiles ? this.truncateField(JSON.stringify(keyFiles), 'key_files') : null, tags ? tags.join(',') : null, sessionId);
     }
     getLastSession() {
         const stmt = this.db.prepare(`
@@ -237,7 +308,7 @@ export class MemoryDatabase {
         const stmt = this.db.prepare(`
       INSERT INTO open_questions (question, context) VALUES (?, ?)
     `);
-        const result = stmt.run(question, context || null);
+        const result = stmt.run(this.truncateField(question, 'question'), this.truncateField(context, 'context'));
         return result.lastInsertRowid;
     }
     resolveQuestion(id, resolution) {
