@@ -515,10 +515,68 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
     }
 });
+// Output prior context on startup
+function outputPriorContext() {
+    const lastSession = db.getLastSession();
+    const decisions = db.getRecentDecisions(5);
+    const prefs = db.getAllPreferences();
+    const questions = db.getOpenQuestions();
+    const hasContent = lastSession?.summary || decisions.length > 0 || prefs.length > 0 || questions.length > 0;
+    if (!hasContent) {
+        console.error('🧙 Pensieve ready (no prior context yet)');
+        return;
+    }
+    console.error('');
+    console.error('═══════════════════════════════════════════════════════════════');
+    console.error('🧙 PENSIEVE — Prior Context Loaded');
+    console.error('═══════════════════════════════════════════════════════════════');
+    if (lastSession?.ended_at) {
+        console.error('');
+        console.error('📋 LAST SESSION:');
+        if (lastSession.summary)
+            console.error(`   ${lastSession.summary}`);
+        if (lastSession.work_in_progress) {
+            console.error('');
+            console.error('🚧 WORK IN PROGRESS:');
+            console.error(`   ${lastSession.work_in_progress}`);
+        }
+        if (lastSession.next_steps) {
+            console.error('');
+            console.error('➡️  NEXT STEPS:');
+            console.error(`   ${lastSession.next_steps}`);
+        }
+    }
+    if (decisions.length > 0) {
+        console.error('');
+        console.error('🎯 KEY DECISIONS:');
+        decisions.forEach(d => {
+            console.error(`   • [${d.topic}] ${d.decision}`);
+        });
+    }
+    if (prefs.length > 0) {
+        console.error('');
+        console.error('⚙️  PREFERENCES:');
+        prefs.forEach(p => {
+            console.error(`   • ${p.category}/${p.key}: ${p.value}`);
+        });
+    }
+    if (questions.length > 0) {
+        console.error('');
+        console.error('❓ OPEN QUESTIONS:');
+        questions.forEach(q => {
+            console.error(`   • [#${q.id}] ${q.question}`);
+        });
+    }
+    console.error('');
+    console.error('═══════════════════════════════════════════════════════════════');
+    console.error(`Database: ${db.getPath()}`);
+    console.error('═══════════════════════════════════════════════════════════════');
+}
 // Start server
 async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error('Pensieve server running on stdio');
+    // Output prior context so Claude sees it automatically
+    outputPriorContext();
 }
 main().catch(console.error);

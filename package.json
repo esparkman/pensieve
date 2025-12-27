@@ -1,6 +1,6 @@
 {
   "name": "@esparkman/pensieve",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pensieve - persistent memory for Claude Code. Remember decisions, preferences, and context across sessions.",
   "type": "module",
   "main": "dist/index.js",
