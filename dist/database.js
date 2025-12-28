@@ -15,32 +15,82 @@ export const LIMITS = {
 export class MemoryDatabase {
     db;
     projectPath;
+    dbPath;
     constructor(projectPath) {
         // Use provided path, or detect from current directory, or use home
         this.projectPath = projectPath || process.cwd();
-        const dbPath = this.getDbPath();
+        this.dbPath = this.getDbPath();
         // Ensure directory exists
-        const dbDir = dirname(dbPath);
+        const dbDir = dirname(this.dbPath);
         if (!existsSync(dbDir)) {
             mkdirSync(dbDir, { recursive: true });
         }
-        this.db = new Database(dbPath);
+        this.db = this.openDatabase();
         this.initSchema();
     }
+    openDatabase() {
+        // Always try to open in read-write mode
+        // If file doesn't exist, it will be created
+        try {
+            return new Database(this.dbPath, { fileMustExist: false });
+        }
+        catch (error) {
+            console.error(`[Pensieve] Failed to open database: ${error}`);
+            throw error;
+        }
+    }
+    /**
+     * Check if the database is writable and reconnect if needed
+     */
+    ensureWritable() {
+        try {
+            // Test write capability
+            this.db.exec('SELECT 1');
+            this.db.prepare('CREATE TABLE IF NOT EXISTS _pensieve_health_check (id INTEGER)').run();
+            return true;
+        }
+        catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            if (errorMessage.includes('readonly')) {
+                console.error('[Pensieve] Database is read-only, attempting reconnection...');
+                try {
+                    this.db.close();
+                    this.db = this.openDatabase();
+                    console.error('[Pensieve] Reconnected successfully');
+                    return true;
+                }
+                catch (reconnectError) {
+                    console.error(`[Pensieve] Reconnection failed: ${reconnectError}`);
+                    return false;
+                }
+            }
+            return false;
+        }
+    }
     getDbPath() {
-        // Check for explicit environment variable override first
+        // Check for explicit database path override
         const envPath = process.env.PENSIEVE_DB_PATH;
         if (envPath) {
             console.error(`[Pensieve] Using database from PENSIEVE_DB_PATH: ${envPath}`);
             return envPath;
         }
-        // Try project-local first, then fall back to home directory
+        // Check for explicit project path (recommended for MCP server usage)
+        // This should be set in the MCP server config to ensure deterministic behavior
+        const projectDir = process.env.PENSIEVE_PROJECT_DIR;
+        if (projectDir) {
+            const projectPath = join(projectDir, '.pensieve', 'memory.sqlite');
+            console.error(`[Pensieve] Using project database from PENSIEVE_PROJECT_DIR: ${projectPath}`);
+            return projectPath;
+        }
+        // Fallback: Try project-local first, then fall back to home directory
+        // WARNING: Using process.cwd() is unreliable in MCP server context
         const localPath = join(this.projectPath, '.pensieve', 'memory.sqlite');
         const globalPath = join(homedir(), '.claude-pensieve', 'memory.sqlite');
         // If local .pensieve directory exists or we're in a git repo, use local
         if (existsSync(join(this.projectPath, '.pensieve')) ||
             existsSync(join(this.projectPath, '.git'))) {
-            console.error(`[Pensieve] Using project-local database: ${localPath}`);
+            console.error(`[Pensieve] WARNING: Using cwd-based path (unreliable): ${localPath}`);
+            console.error(`[Pensieve] Set PENSIEVE_PROJECT_DIR for deterministic behavior`);
             return localPath;
         }
         console.error(`[Pensieve] Using global database: ${globalPath}`);
@@ -177,6 +227,7 @@ export class MemoryDatabase {
     }
     // Decision methods
     addDecision(decision) {
+        this.ensureWritable();
         this.pruneIfNeeded();
         const stmt = this.db.prepare(`
       INSERT INTO decisions (topic, decision, rationale, alternatives, source)
@@ -205,6 +256,7 @@ export class MemoryDatabase {
     }
     // Preference methods
     setPreference(pref) {
+        this.ensureWritable();
         const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO preferences (category, key, value, notes, updated_at)
       VALUES (?, ?, ?, ?, datetime('now'))
@@ -231,6 +283,7 @@ export class MemoryDatabase {
     }
     // Discovery methods
     addDiscovery(discovery) {
+        this.ensureWritable();
         this.pruneIfNeeded();
         const stmt = this.db.prepare(`
       INSERT INTO discoveries (category, name, location, description, metadata, confidence)
@@ -257,6 +310,7 @@ export class MemoryDatabase {
     }
     // Entity methods
     upsertEntity(entity) {
+        this.ensureWritable();
         const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO entities (name, description, relationships, attributes, location, updated_at)
       VALUES (?, ?, ?, ?, ?, datetime('now'))
@@ -273,11 +327,13 @@ export class MemoryDatabase {
     }
     // Session methods
     startSession() {
+        this.ensureWritable();
         const stmt = this.db.prepare(`INSERT INTO sessions (started_at) VALUES (datetime('now'))`);
         const result = stmt.run();
         return result.lastInsertRowid;
     }
     endSession(sessionId, summary, workInProgress, nextSteps, keyFiles, tags) {
+        this.ensureWritable();
         this.pruneIfNeeded();
         const stmt = this.db.prepare(`
       UPDATE sessions
@@ -305,6 +361,7 @@ export class MemoryDatabase {
     }
     // Open questions methods
     addQuestion(question, context) {
+        this.ensureWritable();
         const stmt = this.db.prepare(`
       INSERT INTO open_questions (question, context) VALUES (?, ?)
     `);
@@ -312,6 +369,7 @@ export class MemoryDatabase {
         return result.lastInsertRowid;
     }
     resolveQuestion(id, resolution) {
+        this.ensureWritable();
         const stmt = this.db.prepare(`
       UPDATE open_questions
       SET status = 'resolved', resolution = ?, resolved_at = datetime('now')
@@ -336,7 +394,7 @@ export class MemoryDatabase {
     }
     // Get database path for debugging
     getPath() {
-        return this.getDbPath();
+        return this.dbPath;
     }
     close() {
         this.db.close();

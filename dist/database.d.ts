@@ -65,7 +65,13 @@ export interface OpenQuestion {
 export declare class MemoryDatabase {
     private db;
     private projectPath;
+    private dbPath;
     constructor(projectPath?: string);
+    private openDatabase;
+    /**
+     * Check if the database is writable and reconnect if needed
+     */
+    ensureWritable(): boolean;
     private getDbPath;
     /**
      * Truncate a string to the maximum field length
