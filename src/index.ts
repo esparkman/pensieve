@@ -8,6 +8,10 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { MemoryDatabase, LIMITS } from './database.js';
 import { checkFieldsForSecrets, formatSecretWarning } from './security.js';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { existsSync, mkdirSync, copyFileSync, readdirSync, readFileSync } from 'fs';
+import { homedir } from 'os';
 
 // Initialize database
 const db = new MemoryDatabase();
@@ -578,6 +582,65 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+// Install slash commands to user's ~/.claude/commands/ directory
+function installCommands(): void {
+  try {
+    // Find the package's .claude/commands directory
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    // Go up from dist/ to package root, then into .claude/commands
+    const packageCommandsDir = join(__dirname, '..', '.claude', 'commands');
+
+    if (!existsSync(packageCommandsDir)) {
+      // Commands directory not found in package - this is fine for dev mode
+      return;
+    }
+
+    // Target directory
+    const userCommandsDir = join(homedir(), '.claude', 'commands');
+
+    // Create target directory if it doesn't exist
+    if (!existsSync(userCommandsDir)) {
+      mkdirSync(userCommandsDir, { recursive: true });
+    }
+
+    // Get all command files from package
+    const commandFiles = readdirSync(packageCommandsDir).filter(f => f.endsWith('.md'));
+
+    let installed = 0;
+    let updated = 0;
+
+    for (const file of commandFiles) {
+      const sourcePath = join(packageCommandsDir, file);
+      const targetPath = join(userCommandsDir, file);
+
+      // Read source content
+      const sourceContent = readFileSync(sourcePath, 'utf-8');
+
+      // Check if target exists and compare content
+      if (existsSync(targetPath)) {
+        const targetContent = readFileSync(targetPath, 'utf-8');
+        if (sourceContent !== targetContent) {
+          // Update if different
+          copyFileSync(sourcePath, targetPath);
+          updated++;
+        }
+      } else {
+        // Install if missing
+        copyFileSync(sourcePath, targetPath);
+        installed++;
+      }
+    }
+
+    if (installed > 0 || updated > 0) {
+      console.error(`[Pensieve] Commands: ${installed} installed, ${updated} updated in ~/.claude/commands/`);
+    }
+  } catch (error) {
+    // Non-fatal - just log and continue
+    console.error(`[Pensieve] Warning: Could not install commands: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 // Output prior context on startup
 function outputPriorContext(): void {
   const lastSession = db.getLastSession();
@@ -645,6 +708,9 @@ function outputPriorContext(): void {
 
 // Start server
 async function main() {
+  // Install slash commands to ~/.claude/commands/
+  installCommands();
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
