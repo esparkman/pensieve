@@ -8,8 +8,8 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { existsSync, mkdirSync, copyFileSync, readdirSync, readFileSync } from 'fs';
 import { homedir } from 'os';
-// Initialize database
-const db = new MemoryDatabase();
+// Database instance (initialized async in main)
+let db;
 // Create MCP server
 const server = new Server({
     name: 'pensieve',
@@ -629,6 +629,8 @@ function outputPriorContext() {
 }
 // Start server
 async function main() {
+    // Initialize database (async for sql.js WASM loading)
+    db = await MemoryDatabase.create();
     // Install slash commands to ~/.claude/commands/
     installCommands();
     const transport = new StdioServerTransport();

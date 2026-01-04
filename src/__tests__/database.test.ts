@@ -20,12 +20,12 @@ describe('Database: Field Truncation', () => {
   let db: MemoryDatabase;
   let testDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     // Create a temporary directory for tests
     testDir = join(tmpdir(), `pensieve-test-${Date.now()}`);
     mkdirSync(testDir, { recursive: true });
     mkdirSync(join(testDir, '.pensieve'), { recursive: true });
-    db = new MemoryDatabase(testDir);
+    db = await MemoryDatabase.create(testDir);
   });
 
   afterEach(() => {
@@ -173,11 +173,11 @@ describe('Database: Storage Limits and Pruning', () => {
   let db: MemoryDatabase;
   let testDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     testDir = join(tmpdir(), `pensieve-test-${Date.now()}`);
     mkdirSync(testDir, { recursive: true });
     mkdirSync(join(testDir, '.pensieve'), { recursive: true });
-    db = new MemoryDatabase(testDir);
+    db = await MemoryDatabase.create(testDir);
   });
 
   afterEach(() => {
@@ -233,7 +233,7 @@ describe('Database: Storage Limits and Pruning', () => {
 });
 
 describe('Database: Path Resolution', () => {
-  it('uses PENSIEVE_DB_PATH environment variable when set', () => {
+  it('uses PENSIEVE_DB_PATH environment variable when set', async () => {
     const testPath = join(tmpdir(), `pensieve-env-test-${Date.now()}`);
     mkdirSync(testPath, { recursive: true });
 
@@ -241,7 +241,7 @@ describe('Database: Path Resolution', () => {
     process.env.PENSIEVE_DB_PATH = customDbPath;
 
     try {
-      const db = new MemoryDatabase();
+      const db = await MemoryDatabase.create();
       db.addDecision({ topic: 'test', decision: 'test' });
 
       // Verify the database was created at the custom path

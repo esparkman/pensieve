@@ -1,5 +1,5 @@
-import Database from 'better-sqlite3';
-import { existsSync, mkdirSync } from 'fs';
+import initSqlJs, { Database as SqlJsDatabase, SqlValue } from 'sql.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
 
@@ -77,64 +77,66 @@ export interface OpenQuestion {
 }
 
 export class MemoryDatabase {
-  private db: Database.Database;
-  private projectPath: string;
+  private db: SqlJsDatabase;
   private dbPath: string;
 
-  constructor(projectPath?: string) {
-    // Use provided path, or detect from current directory, or use home
-    this.projectPath = projectPath || process.cwd();
-    this.dbPath = this.getDbPath();
+  private constructor(db: SqlJsDatabase, dbPath: string) {
+    this.db = db;
+    this.dbPath = dbPath;
+  }
+
+  /**
+   * Create a new MemoryDatabase instance (async factory)
+   */
+  static async create(projectPath?: string): Promise<MemoryDatabase> {
+    const dbPath = MemoryDatabase.getDbPath(projectPath || process.cwd());
 
     // Ensure directory exists
-    const dbDir = dirname(this.dbPath);
+    const dbDir = dirname(dbPath);
     if (!existsSync(dbDir)) {
       mkdirSync(dbDir, { recursive: true });
     }
 
-    this.db = this.openDatabase();
-    this.initSchema();
-  }
+    // Initialize sql.js
+    const SQL = await initSqlJs();
 
-  private openDatabase(): Database.Database {
-    // Always try to open in read-write mode
-    // If file doesn't exist, it will be created
-    try {
-      return new Database(this.dbPath, { fileMustExist: false });
-    } catch (error) {
-      console.error(`[Pensieve] Failed to open database: ${error}`);
-      throw error;
+    // Load existing database or create new one
+    let db: SqlJsDatabase;
+    if (existsSync(dbPath)) {
+      try {
+        const fileBuffer = readFileSync(dbPath);
+        db = new SQL.Database(fileBuffer);
+        console.error(`[Pensieve] Loaded existing database: ${dbPath}`);
+      } catch (error) {
+        console.error(`[Pensieve] Failed to load database, creating new: ${error}`);
+        db = new SQL.Database();
+      }
+    } else {
+      db = new SQL.Database();
+      console.error(`[Pensieve] Created new database: ${dbPath}`);
     }
+
+    const instance = new MemoryDatabase(db, dbPath);
+    instance.initSchema();
+    instance.save(); // Ensure schema is persisted
+
+    return instance;
   }
 
   /**
-   * Check if the database is writable and reconnect if needed
+   * Save database to disk
    */
-  ensureWritable(): boolean {
+  private save(): void {
     try {
-      // Test write capability
-      this.db.exec('SELECT 1');
-      this.db.prepare('CREATE TABLE IF NOT EXISTS _pensieve_health_check (id INTEGER)').run();
-      return true;
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (errorMessage.includes('readonly')) {
-        console.error('[Pensieve] Database is read-only, attempting reconnection...');
-        try {
-          this.db.close();
-          this.db = this.openDatabase();
-          console.error('[Pensieve] Reconnected successfully');
-          return true;
-        } catch (reconnectError) {
-          console.error(`[Pensieve] Reconnection failed: ${reconnectError}`);
-          return false;
-        }
-      }
-      return false;
+      const data = this.db.export();
+      const buffer = Buffer.from(data);
+      writeFileSync(this.dbPath, buffer);
+    } catch (error) {
+      console.error(`[Pensieve] Failed to save database: ${error}`);
     }
   }
 
-  private getDbPath(): string {
+  private static getDbPath(projectPath: string): string {
     // Check for explicit database path override
     const envPath = process.env.PENSIEVE_DB_PATH;
     if (envPath) {
@@ -143,22 +145,20 @@ export class MemoryDatabase {
     }
 
     // Check for explicit project path (recommended for MCP server usage)
-    // This should be set in the MCP server config to ensure deterministic behavior
     const projectDir = process.env.PENSIEVE_PROJECT_DIR;
     if (projectDir) {
-      const projectPath = join(projectDir, '.pensieve', 'memory.sqlite');
-      console.error(`[Pensieve] Using project database from PENSIEVE_PROJECT_DIR: ${projectPath}`);
-      return projectPath;
+      const projectDbPath = join(projectDir, '.pensieve', 'memory.sqlite');
+      console.error(`[Pensieve] Using project database from PENSIEVE_PROJECT_DIR: ${projectDbPath}`);
+      return projectDbPath;
     }
 
     // Fallback: Try project-local first, then fall back to home directory
-    // WARNING: Using process.cwd() is unreliable in MCP server context
-    const localPath = join(this.projectPath, '.pensieve', 'memory.sqlite');
+    const localPath = join(projectPath, '.pensieve', 'memory.sqlite');
     const globalPath = join(homedir(), '.claude-pensieve', 'memory.sqlite');
 
     // If local .pensieve directory exists or we're in a git repo, use local
-    if (existsSync(join(this.projectPath, '.pensieve')) ||
-        existsSync(join(this.projectPath, '.git'))) {
+    if (existsSync(join(projectPath, '.pensieve')) ||
+        existsSync(join(projectPath, '.git'))) {
       console.error(`[Pensieve] WARNING: Using cwd-based path (unreliable): ${localPath}`);
       console.error(`[Pensieve] Set PENSIEVE_PROJECT_DIR for deterministic behavior`);
       return localPath;
@@ -184,46 +184,48 @@ export class MemoryDatabase {
    */
   private pruneIfNeeded(): void {
     // Prune old sessions beyond retention period
-    this.db.prepare(`
+    this.db.run(`
       DELETE FROM sessions
       WHERE ended_at IS NOT NULL
       AND datetime(ended_at) < datetime('now', '-${LIMITS.SESSION_RETENTION_DAYS} days')
-    `).run();
+    `);
 
     // Prune excess decisions (keep most recent)
-    const decisionCount = (this.db.prepare('SELECT COUNT(*) as count FROM decisions').get() as { count: number }).count;
+    const decisionResult = this.db.exec('SELECT COUNT(*) as count FROM decisions');
+    const decisionCount = decisionResult.length > 0 ? decisionResult[0].values[0][0] as number : 0;
     if (decisionCount > LIMITS.MAX_DECISIONS) {
       const excess = decisionCount - LIMITS.MAX_DECISIONS;
-      this.db.prepare(`
+      this.db.run(`
         DELETE FROM decisions WHERE id IN (
           SELECT id FROM decisions ORDER BY decided_at ASC LIMIT ?
         )
-      `).run(excess);
+      `, [excess]);
       console.error(`[Pensieve] Pruned ${excess} old decisions`);
     }
 
     // Prune excess discoveries
-    const discoveryCount = (this.db.prepare('SELECT COUNT(*) as count FROM discoveries').get() as { count: number }).count;
+    const discoveryResult = this.db.exec('SELECT COUNT(*) as count FROM discoveries');
+    const discoveryCount = discoveryResult.length > 0 ? discoveryResult[0].values[0][0] as number : 0;
     if (discoveryCount > LIMITS.MAX_DISCOVERIES) {
       const excess = discoveryCount - LIMITS.MAX_DISCOVERIES;
-      this.db.prepare(`
+      this.db.run(`
         DELETE FROM discoveries WHERE id IN (
           SELECT id FROM discoveries ORDER BY discovered_at ASC LIMIT ?
         )
-      `).run(excess);
+      `, [excess]);
       console.error(`[Pensieve] Pruned ${excess} old discoveries`);
     }
 
     // Prune resolved questions older than 30 days
-    this.db.prepare(`
+    this.db.run(`
       DELETE FROM open_questions
       WHERE status = 'resolved'
       AND datetime(resolved_at) < datetime('now', '-30 days')
-    `).run();
+    `);
   }
 
   private initSchema(): void {
-    this.db.exec(`
+    this.db.run(`
       -- Core discoveries about the codebase
       CREATE TABLE IF NOT EXISTS discoveries (
         id INTEGER PRIMARY KEY,
@@ -234,9 +236,10 @@ export class MemoryDatabase {
         metadata TEXT,
         discovered_at TEXT DEFAULT (datetime('now')),
         confidence REAL DEFAULT 1.0
-      );
+      )
+    `);
 
-      -- Architectural and design decisions
+    this.db.run(`
       CREATE TABLE IF NOT EXISTS decisions (
         id INTEGER PRIMARY KEY,
         topic TEXT NOT NULL,
@@ -245,9 +248,10 @@ export class MemoryDatabase {
         alternatives TEXT,
         decided_at TEXT DEFAULT (datetime('now')),
         source TEXT
-      );
+      )
+    `);
 
-      -- User preferences and conventions
+    this.db.run(`
       CREATE TABLE IF NOT EXISTS preferences (
         id INTEGER PRIMARY KEY,
         category TEXT NOT NULL,
@@ -256,9 +260,10 @@ export class MemoryDatabase {
         notes TEXT,
         updated_at TEXT DEFAULT (datetime('now')),
         UNIQUE(category, key)
-      );
+      )
+    `);
 
-      -- Session summaries for continuity
+    this.db.run(`
       CREATE TABLE IF NOT EXISTS sessions (
         id INTEGER PRIMARY KEY,
         started_at TEXT DEFAULT (datetime('now')),
@@ -268,9 +273,10 @@ export class MemoryDatabase {
         next_steps TEXT,
         key_files TEXT,
         tags TEXT
-      );
+      )
+    `);
 
-      -- Entities/domain model understanding
+    this.db.run(`
       CREATE TABLE IF NOT EXISTS entities (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
@@ -279,9 +285,10 @@ export class MemoryDatabase {
         attributes TEXT,
         location TEXT,
         updated_at TEXT DEFAULT (datetime('now'))
-      );
+      )
+    `);
 
-      -- Open questions and blockers
+    this.db.run(`
       CREATE TABLE IF NOT EXISTS open_questions (
         id INTEGER PRIMARY KEY,
         question TEXT NOT NULL,
@@ -290,170 +297,191 @@ export class MemoryDatabase {
         resolution TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         resolved_at TEXT
-      );
-
-      -- Indexes for common queries
-      CREATE INDEX IF NOT EXISTS idx_discoveries_category ON discoveries(category);
-      CREATE INDEX IF NOT EXISTS idx_discoveries_name ON discoveries(name);
-      CREATE INDEX IF NOT EXISTS idx_decisions_topic ON decisions(topic);
-      CREATE INDEX IF NOT EXISTS idx_preferences_category ON preferences(category);
-      CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
-      CREATE INDEX IF NOT EXISTS idx_open_questions_status ON open_questions(status);
+      )
     `);
+
+    // Create indexes
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_discoveries_category ON discoveries(category)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_discoveries_name ON discoveries(name)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_decisions_topic ON decisions(topic)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_preferences_category ON preferences(category)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_open_questions_status ON open_questions(status)');
+  }
+
+  /**
+   * Get last inserted row ID
+   */
+  private getLastInsertRowId(): number {
+    const result = this.db.exec('SELECT last_insert_rowid()');
+    return result.length > 0 ? result[0].values[0][0] as number : 0;
+  }
+
+  /**
+   * Execute a query and return all rows as objects
+   */
+  private queryAll<T>(sql: string, params: SqlValue[] = []): T[] {
+    const stmt = this.db.prepare(sql);
+    stmt.bind(params);
+
+    const results: T[] = [];
+    while (stmt.step()) {
+      results.push(stmt.getAsObject() as T);
+    }
+    stmt.free();
+    return results;
+  }
+
+  /**
+   * Execute a query and return the first row as an object
+   */
+  private queryOne<T>(sql: string, params: SqlValue[] = []): T | undefined {
+    const results = this.queryAll<T>(sql, params);
+    return results.length > 0 ? results[0] : undefined;
   }
 
   // Decision methods
   addDecision(decision: Decision): number {
-    this.ensureWritable();
     this.pruneIfNeeded();
 
-    const stmt = this.db.prepare(`
+    this.db.run(`
       INSERT INTO decisions (topic, decision, rationale, alternatives, source)
       VALUES (?, ?, ?, ?, ?)
-    `);
-    const result = stmt.run(
+    `, [
       this.truncateField(decision.topic, 'topic'),
       this.truncateField(decision.decision, 'decision'),
       this.truncateField(decision.rationale, 'rationale'),
       this.truncateField(decision.alternatives, 'alternatives'),
       decision.source || 'user'
-    );
-    return result.lastInsertRowid as number;
+    ]);
+
+    const id = this.getLastInsertRowId();
+    this.save();
+    return id;
   }
 
   searchDecisions(query: string): Decision[] {
-    const stmt = this.db.prepare(`
+    const pattern = `%${query}%`;
+    return this.queryAll<Decision>(`
       SELECT * FROM decisions
       WHERE topic LIKE ? OR decision LIKE ? OR rationale LIKE ?
       ORDER BY decided_at DESC
       LIMIT 50
-    `);
-    const pattern = `%${query}%`;
-    return stmt.all(pattern, pattern, pattern) as Decision[];
+    `, [pattern, pattern, pattern]);
   }
 
   getRecentDecisions(limit: number = 10): Decision[] {
-    const stmt = this.db.prepare(`
+    return this.queryAll<Decision>(`
       SELECT * FROM decisions
       ORDER BY decided_at DESC
       LIMIT ?
-    `);
-    return stmt.all(limit) as Decision[];
+    `, [limit]);
   }
 
   // Preference methods
   setPreference(pref: Preference): void {
-    this.ensureWritable();
-    const stmt = this.db.prepare(`
+    this.db.run(`
       INSERT OR REPLACE INTO preferences (category, key, value, notes, updated_at)
       VALUES (?, ?, ?, ?, datetime('now'))
-    `);
-    stmt.run(
+    `, [
       this.truncateField(pref.category, 'category'),
       this.truncateField(pref.key, 'key'),
       this.truncateField(pref.value, 'value'),
       this.truncateField(pref.notes, 'notes')
-    );
+    ]);
+    this.save();
   }
 
   getPreference(category: string, key: string): Preference | undefined {
-    const stmt = this.db.prepare(`
+    return this.queryOne<Preference>(`
       SELECT * FROM preferences WHERE category = ? AND key = ?
-    `);
-    return stmt.get(category, key) as Preference | undefined;
+    `, [category, key]);
   }
 
   getPreferencesByCategory(category: string): Preference[] {
-    const stmt = this.db.prepare(`
+    return this.queryAll<Preference>(`
       SELECT * FROM preferences WHERE category = ? ORDER BY key
-    `);
-    return stmt.all(category) as Preference[];
+    `, [category]);
   }
 
   getAllPreferences(): Preference[] {
-    const stmt = this.db.prepare(`
+    return this.queryAll<Preference>(`
       SELECT * FROM preferences ORDER BY category, key
     `);
-    return stmt.all() as Preference[];
   }
 
   // Discovery methods
   addDiscovery(discovery: Discovery): number {
-    this.ensureWritable();
     this.pruneIfNeeded();
 
-    const stmt = this.db.prepare(`
+    this.db.run(`
       INSERT INTO discoveries (category, name, location, description, metadata, confidence)
       VALUES (?, ?, ?, ?, ?, ?)
-    `);
-    const result = stmt.run(
+    `, [
       this.truncateField(discovery.category, 'category'),
       this.truncateField(discovery.name, 'name'),
       this.truncateField(discovery.location, 'location'),
       this.truncateField(discovery.description, 'description'),
       this.truncateField(discovery.metadata, 'metadata'),
       discovery.confidence || 1.0
-    );
-    return result.lastInsertRowid as number;
+    ]);
+
+    const id = this.getLastInsertRowId();
+    this.save();
+    return id;
   }
 
   searchDiscoveries(query: string): Discovery[] {
-    const stmt = this.db.prepare(`
+    const pattern = `%${query}%`;
+    return this.queryAll<Discovery>(`
       SELECT * FROM discoveries
       WHERE name LIKE ? OR description LIKE ? OR location LIKE ?
       ORDER BY discovered_at DESC
       LIMIT 50
-    `);
-    const pattern = `%${query}%`;
-    return stmt.all(pattern, pattern, pattern) as Discovery[];
+    `, [pattern, pattern, pattern]);
   }
 
   getDiscoveriesByCategory(category: string): Discovery[] {
-    const stmt = this.db.prepare(`
+    return this.queryAll<Discovery>(`
       SELECT * FROM discoveries WHERE category = ? ORDER BY name
-    `);
-    return stmt.all(category) as Discovery[];
+    `, [category]);
   }
 
   // Entity methods
   upsertEntity(entity: Entity): void {
-    this.ensureWritable();
-    const stmt = this.db.prepare(`
+    this.db.run(`
       INSERT OR REPLACE INTO entities (name, description, relationships, attributes, location, updated_at)
       VALUES (?, ?, ?, ?, ?, datetime('now'))
-    `);
-    stmt.run(
+    `, [
       this.truncateField(entity.name, 'name'),
       this.truncateField(entity.description, 'description'),
       this.truncateField(entity.relationships, 'relationships'),
       this.truncateField(entity.attributes, 'attributes'),
       this.truncateField(entity.location, 'location')
-    );
+    ]);
+    this.save();
   }
 
   getEntity(name: string): Entity | undefined {
-    const stmt = this.db.prepare(`SELECT * FROM entities WHERE name = ?`);
-    return stmt.get(name) as Entity | undefined;
+    return this.queryOne<Entity>(`SELECT * FROM entities WHERE name = ?`, [name]);
   }
 
   getAllEntities(): Entity[] {
-    const stmt = this.db.prepare(`SELECT * FROM entities ORDER BY name`);
-    return stmt.all() as Entity[];
+    return this.queryAll<Entity>(`SELECT * FROM entities ORDER BY name`);
   }
 
   // Session methods
   startSession(): number {
-    this.ensureWritable();
-    const stmt = this.db.prepare(`INSERT INTO sessions (started_at) VALUES (datetime('now'))`);
-    const result = stmt.run();
-    return result.lastInsertRowid as number;
+    this.db.run(`INSERT INTO sessions (started_at) VALUES (datetime('now'))`);
+    const id = this.getLastInsertRowId();
+    this.save();
+    return id;
   }
 
   endSession(sessionId: number, summary: string, workInProgress?: string, nextSteps?: string, keyFiles?: string[], tags?: string[]): void {
-    this.ensureWritable();
     this.pruneIfNeeded();
 
-    const stmt = this.db.prepare(`
+    this.db.run(`
       UPDATE sessions
       SET ended_at = datetime('now'),
           summary = ?,
@@ -462,59 +490,56 @@ export class MemoryDatabase {
           key_files = ?,
           tags = ?
       WHERE id = ?
-    `);
-    stmt.run(
+    `, [
       this.truncateField(summary, 'summary'),
       this.truncateField(workInProgress, 'work_in_progress'),
       this.truncateField(nextSteps, 'next_steps'),
       keyFiles ? this.truncateField(JSON.stringify(keyFiles), 'key_files') : null,
       tags ? tags.join(',') : null,
       sessionId
-    );
+    ]);
+    this.save();
   }
 
   getLastSession(): Session | undefined {
-    const stmt = this.db.prepare(`
+    return this.queryOne<Session>(`
       SELECT * FROM sessions ORDER BY started_at DESC LIMIT 1
     `);
-    return stmt.get() as Session | undefined;
   }
 
   getCurrentSession(): Session | undefined {
-    const stmt = this.db.prepare(`
+    return this.queryOne<Session>(`
       SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1
     `);
-    return stmt.get() as Session | undefined;
   }
 
   // Open questions methods
   addQuestion(question: string, context?: string): number {
-    this.ensureWritable();
-    const stmt = this.db.prepare(`
+    this.db.run(`
       INSERT INTO open_questions (question, context) VALUES (?, ?)
-    `);
-    const result = stmt.run(
+    `, [
       this.truncateField(question, 'question'),
       this.truncateField(context, 'context')
-    );
-    return result.lastInsertRowid as number;
+    ]);
+
+    const id = this.getLastInsertRowId();
+    this.save();
+    return id;
   }
 
   resolveQuestion(id: number, resolution: string): void {
-    this.ensureWritable();
-    const stmt = this.db.prepare(`
+    this.db.run(`
       UPDATE open_questions
       SET status = 'resolved', resolution = ?, resolved_at = datetime('now')
       WHERE id = ?
-    `);
-    stmt.run(resolution, id);
+    `, [resolution, id]);
+    this.save();
   }
 
   getOpenQuestions(): OpenQuestion[] {
-    const stmt = this.db.prepare(`
+    return this.queryAll<OpenQuestion>(`
       SELECT * FROM open_questions WHERE status = 'open' ORDER BY created_at DESC
     `);
-    return stmt.all() as OpenQuestion[];
   }
 
   // General search
@@ -535,6 +560,7 @@ export class MemoryDatabase {
   }
 
   close(): void {
+    this.save();
     this.db.close();
   }
 }

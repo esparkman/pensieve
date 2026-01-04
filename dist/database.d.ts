@@ -64,15 +64,17 @@ export interface OpenQuestion {
 }
 export declare class MemoryDatabase {
     private db;
-    private projectPath;
     private dbPath;
-    constructor(projectPath?: string);
-    private openDatabase;
+    private constructor();
     /**
-     * Check if the database is writable and reconnect if needed
+     * Create a new MemoryDatabase instance (async factory)
      */
-    ensureWritable(): boolean;
-    private getDbPath;
+    static create(projectPath?: string): Promise<MemoryDatabase>;
+    /**
+     * Save database to disk
+     */
+    private save;
+    private static getDbPath;
     /**
      * Truncate a string to the maximum field length
      */
@@ -82,6 +84,18 @@ export declare class MemoryDatabase {
      */
     private pruneIfNeeded;
     private initSchema;
+    /**
+     * Get last inserted row ID
+     */
+    private getLastInsertRowId;
+    /**
+     * Execute a query and return all rows as objects
+     */
+    private queryAll;
+    /**
+     * Execute a query and return the first row as an object
+     */
+    private queryOne;
     addDecision(decision: Decision): number;
     searchDecisions(query: string): Decision[];
     getRecentDecisions(limit?: number): Decision[];

@@ -1,5 +1,5 @@
-import Database from 'better-sqlite3';
-import { existsSync, mkdirSync } from 'fs';
+import initSqlJs from 'sql.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
 // Configuration limits
@@ -14,60 +14,59 @@ export const LIMITS = {
 };
 export class MemoryDatabase {
     db;
-    projectPath;
     dbPath;
-    constructor(projectPath) {
-        // Use provided path, or detect from current directory, or use home
-        this.projectPath = projectPath || process.cwd();
-        this.dbPath = this.getDbPath();
+    constructor(db, dbPath) {
+        this.db = db;
+        this.dbPath = dbPath;
+    }
+    /**
+     * Create a new MemoryDatabase instance (async factory)
+     */
+    static async create(projectPath) {
+        const dbPath = MemoryDatabase.getDbPath(projectPath || process.cwd());
         // Ensure directory exists
-        const dbDir = dirname(this.dbPath);
+        const dbDir = dirname(dbPath);
         if (!existsSync(dbDir)) {
             mkdirSync(dbDir, { recursive: true });
         }
-        this.db = this.openDatabase();
-        this.initSchema();
-    }
-    openDatabase() {
-        // Always try to open in read-write mode
-        // If file doesn't exist, it will be created
-        try {
-            return new Database(this.dbPath, { fileMustExist: false });
+        // Initialize sql.js
+        const SQL = await initSqlJs();
+        // Load existing database or create new one
+        let db;
+        if (existsSync(dbPath)) {
+            try {
+                const fileBuffer = readFileSync(dbPath);
+                db = new SQL.Database(fileBuffer);
+                console.error(`[Pensieve] Loaded existing database: ${dbPath}`);
+            }
+            catch (error) {
+                console.error(`[Pensieve] Failed to load database, creating new: ${error}`);
+                db = new SQL.Database();
+            }
         }
-        catch (error) {
-            console.error(`[Pensieve] Failed to open database: ${error}`);
-            throw error;
+        else {
+            db = new SQL.Database();
+            console.error(`[Pensieve] Created new database: ${dbPath}`);
         }
+        const instance = new MemoryDatabase(db, dbPath);
+        instance.initSchema();
+        instance.save(); // Ensure schema is persisted
+        return instance;
     }
     /**
-     * Check if the database is writable and reconnect if needed
+     * Save database to disk
      */
-    ensureWritable() {
+    save() {
         try {
-            // Test write capability
-            this.db.exec('SELECT 1');
-            this.db.prepare('CREATE TABLE IF NOT EXISTS _pensieve_health_check (id INTEGER)').run();
-            return true;
+            const data = this.db.export();
+            const buffer = Buffer.from(data);
+            writeFileSync(this.dbPath, buffer);
         }
         catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            if (errorMessage.includes('readonly')) {
-                console.error('[Pensieve] Database is read-only, attempting reconnection...');
-                try {
-                    this.db.close();
-                    this.db = this.openDatabase();
-                    console.error('[Pensieve] Reconnected successfully');
-                    return true;
-                }
-                catch (reconnectError) {
-                    console.error(`[Pensieve] Reconnection failed: ${reconnectError}`);
-                    return false;
-                }
-            }
-            return false;
+            console.error(`[Pensieve] Failed to save database: ${error}`);
         }
     }
-    getDbPath() {
+    static getDbPath(projectPath) {
         // Check for explicit database path override
         const envPath = process.env.PENSIEVE_DB_PATH;
         if (envPath) {
@@ -75,20 +74,18 @@ export class MemoryDatabase {
             return envPath;
         }
         // Check for explicit project path (recommended for MCP server usage)
-        // This should be set in the MCP server config to ensure deterministic behavior
         const projectDir = process.env.PENSIEVE_PROJECT_DIR;
         if (projectDir) {
-            const projectPath = join(projectDir, '.pensieve', 'memory.sqlite');
-            console.error(`[Pensieve] Using project database from PENSIEVE_PROJECT_DIR: ${projectPath}`);
-            return projectPath;
+            const projectDbPath = join(projectDir, '.pensieve', 'memory.sqlite');
+            console.error(`[Pensieve] Using project database from PENSIEVE_PROJECT_DIR: ${projectDbPath}`);
+            return projectDbPath;
         }
         // Fallback: Try project-local first, then fall back to home directory
-        // WARNING: Using process.cwd() is unreliable in MCP server context
-        const localPath = join(this.projectPath, '.pensieve', 'memory.sqlite');
+        const localPath = join(projectPath, '.pensieve', 'memory.sqlite');
         const globalPath = join(homedir(), '.claude-pensieve', 'memory.sqlite');
         // If local .pensieve directory exists or we're in a git repo, use local
-        if (existsSync(join(this.projectPath, '.pensieve')) ||
-            existsSync(join(this.projectPath, '.git'))) {
+        if (existsSync(join(projectPath, '.pensieve')) ||
+            existsSync(join(projectPath, '.git'))) {
             console.error(`[Pensieve] WARNING: Using cwd-based path (unreliable): ${localPath}`);
             console.error(`[Pensieve] Set PENSIEVE_PROJECT_DIR for deterministic behavior`);
             return localPath;
@@ -112,42 +109,44 @@ export class MemoryDatabase {
      */
     pruneIfNeeded() {
         // Prune old sessions beyond retention period
-        this.db.prepare(`
+        this.db.run(`
       DELETE FROM sessions
       WHERE ended_at IS NOT NULL
       AND datetime(ended_at) < datetime('now', '-${LIMITS.SESSION_RETENTION_DAYS} days')
-    `).run();
+    `);
         // Prune excess decisions (keep most recent)
-        const decisionCount = this.db.prepare('SELECT COUNT(*) as count FROM decisions').get().count;
+        const decisionResult = this.db.exec('SELECT COUNT(*) as count FROM decisions');
+        const decisionCount = decisionResult.length > 0 ? decisionResult[0].values[0][0] : 0;
         if (decisionCount > LIMITS.MAX_DECISIONS) {
             const excess = decisionCount - LIMITS.MAX_DECISIONS;
-            this.db.prepare(`
+            this.db.run(`
         DELETE FROM decisions WHERE id IN (
           SELECT id FROM decisions ORDER BY decided_at ASC LIMIT ?
         )
-      `).run(excess);
+      `, [excess]);
             console.error(`[Pensieve] Pruned ${excess} old decisions`);
         }
         // Prune excess discoveries
-        const discoveryCount = this.db.prepare('SELECT COUNT(*) as count FROM discoveries').get().count;
+        const discoveryResult = this.db.exec('SELECT COUNT(*) as count FROM discoveries');
+        const discoveryCount = discoveryResult.length > 0 ? discoveryResult[0].values[0][0] : 0;
         if (discoveryCount > LIMITS.MAX_DISCOVERIES) {
             const excess = discoveryCount - LIMITS.MAX_DISCOVERIES;
-            this.db.prepare(`
+            this.db.run(`
         DELETE FROM discoveries WHERE id IN (
           SELECT id FROM discoveries ORDER BY discovered_at ASC LIMIT ?
         )
-      `).run(excess);
+      `, [excess]);
             console.error(`[Pensieve] Pruned ${excess} old discoveries`);
         }
         // Prune resolved questions older than 30 days
-        this.db.prepare(`
+        this.db.run(`
       DELETE FROM open_questions
       WHERE status = 'resolved'
       AND datetime(resolved_at) < datetime('now', '-30 days')
-    `).run();
+    `);
     }
     initSchema() {
-        this.db.exec(`
+        this.db.run(`
       -- Core discoveries about the codebase
       CREATE TABLE IF NOT EXISTS discoveries (
         id INTEGER PRIMARY KEY,
@@ -158,9 +157,9 @@ export class MemoryDatabase {
         metadata TEXT,
         discovered_at TEXT DEFAULT (datetime('now')),
         confidence REAL DEFAULT 1.0
-      );
-
-      -- Architectural and design decisions
+      )
+    `);
+        this.db.run(`
       CREATE TABLE IF NOT EXISTS decisions (
         id INTEGER PRIMARY KEY,
         topic TEXT NOT NULL,
@@ -169,9 +168,9 @@ export class MemoryDatabase {
         alternatives TEXT,
         decided_at TEXT DEFAULT (datetime('now')),
         source TEXT
-      );
-
-      -- User preferences and conventions
+      )
+    `);
+        this.db.run(`
       CREATE TABLE IF NOT EXISTS preferences (
         id INTEGER PRIMARY KEY,
         category TEXT NOT NULL,
@@ -180,9 +179,9 @@ export class MemoryDatabase {
         notes TEXT,
         updated_at TEXT DEFAULT (datetime('now')),
         UNIQUE(category, key)
-      );
-
-      -- Session summaries for continuity
+      )
+    `);
+        this.db.run(`
       CREATE TABLE IF NOT EXISTS sessions (
         id INTEGER PRIMARY KEY,
         started_at TEXT DEFAULT (datetime('now')),
@@ -192,9 +191,9 @@ export class MemoryDatabase {
         next_steps TEXT,
         key_files TEXT,
         tags TEXT
-      );
-
-      -- Entities/domain model understanding
+      )
+    `);
+        this.db.run(`
       CREATE TABLE IF NOT EXISTS entities (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
@@ -203,9 +202,9 @@ export class MemoryDatabase {
         attributes TEXT,
         location TEXT,
         updated_at TEXT DEFAULT (datetime('now'))
-      );
-
-      -- Open questions and blockers
+      )
+    `);
+        this.db.run(`
       CREATE TABLE IF NOT EXISTS open_questions (
         id INTEGER PRIMARY KEY,
         question TEXT NOT NULL,
@@ -214,128 +213,166 @@ export class MemoryDatabase {
         resolution TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         resolved_at TEXT
-      );
-
-      -- Indexes for common queries
-      CREATE INDEX IF NOT EXISTS idx_discoveries_category ON discoveries(category);
-      CREATE INDEX IF NOT EXISTS idx_discoveries_name ON discoveries(name);
-      CREATE INDEX IF NOT EXISTS idx_decisions_topic ON decisions(topic);
-      CREATE INDEX IF NOT EXISTS idx_preferences_category ON preferences(category);
-      CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at);
-      CREATE INDEX IF NOT EXISTS idx_open_questions_status ON open_questions(status);
+      )
     `);
+        // Create indexes
+        this.db.run('CREATE INDEX IF NOT EXISTS idx_discoveries_category ON discoveries(category)');
+        this.db.run('CREATE INDEX IF NOT EXISTS idx_discoveries_name ON discoveries(name)');
+        this.db.run('CREATE INDEX IF NOT EXISTS idx_decisions_topic ON decisions(topic)');
+        this.db.run('CREATE INDEX IF NOT EXISTS idx_preferences_category ON preferences(category)');
+        this.db.run('CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at)');
+        this.db.run('CREATE INDEX IF NOT EXISTS idx_open_questions_status ON open_questions(status)');
+    }
+    /**
+     * Get last inserted row ID
+     */
+    getLastInsertRowId() {
+        const result = this.db.exec('SELECT last_insert_rowid()');
+        return result.length > 0 ? result[0].values[0][0] : 0;
+    }
+    /**
+     * Execute a query and return all rows as objects
+     */
+    queryAll(sql, params = []) {
+        const stmt = this.db.prepare(sql);
+        stmt.bind(params);
+        const results = [];
+        while (stmt.step()) {
+            results.push(stmt.getAsObject());
+        }
+        stmt.free();
+        return results;
+    }
+    /**
+     * Execute a query and return the first row as an object
+     */
+    queryOne(sql, params = []) {
+        const results = this.queryAll(sql, params);
+        return results.length > 0 ? results[0] : undefined;
     }
     // Decision methods
     addDecision(decision) {
-        this.ensureWritable();
         this.pruneIfNeeded();
-        const stmt = this.db.prepare(`
+        this.db.run(`
       INSERT INTO decisions (topic, decision, rationale, alternatives, source)
       VALUES (?, ?, ?, ?, ?)
-    `);
-        const result = stmt.run(this.truncateField(decision.topic, 'topic'), this.truncateField(decision.decision, 'decision'), this.truncateField(decision.rationale, 'rationale'), this.truncateField(decision.alternatives, 'alternatives'), decision.source || 'user');
-        return result.lastInsertRowid;
+    `, [
+            this.truncateField(decision.topic, 'topic'),
+            this.truncateField(decision.decision, 'decision'),
+            this.truncateField(decision.rationale, 'rationale'),
+            this.truncateField(decision.alternatives, 'alternatives'),
+            decision.source || 'user'
+        ]);
+        const id = this.getLastInsertRowId();
+        this.save();
+        return id;
     }
     searchDecisions(query) {
-        const stmt = this.db.prepare(`
+        const pattern = `%${query}%`;
+        return this.queryAll(`
       SELECT * FROM decisions
       WHERE topic LIKE ? OR decision LIKE ? OR rationale LIKE ?
       ORDER BY decided_at DESC
       LIMIT 50
-    `);
-        const pattern = `%${query}%`;
-        return stmt.all(pattern, pattern, pattern);
+    `, [pattern, pattern, pattern]);
     }
     getRecentDecisions(limit = 10) {
-        const stmt = this.db.prepare(`
+        return this.queryAll(`
       SELECT * FROM decisions
       ORDER BY decided_at DESC
       LIMIT ?
-    `);
-        return stmt.all(limit);
+    `, [limit]);
     }
     // Preference methods
     setPreference(pref) {
-        this.ensureWritable();
-        const stmt = this.db.prepare(`
+        this.db.run(`
       INSERT OR REPLACE INTO preferences (category, key, value, notes, updated_at)
       VALUES (?, ?, ?, ?, datetime('now'))
-    `);
-        stmt.run(this.truncateField(pref.category, 'category'), this.truncateField(pref.key, 'key'), this.truncateField(pref.value, 'value'), this.truncateField(pref.notes, 'notes'));
+    `, [
+            this.truncateField(pref.category, 'category'),
+            this.truncateField(pref.key, 'key'),
+            this.truncateField(pref.value, 'value'),
+            this.truncateField(pref.notes, 'notes')
+        ]);
+        this.save();
     }
     getPreference(category, key) {
-        const stmt = this.db.prepare(`
+        return this.queryOne(`
       SELECT * FROM preferences WHERE category = ? AND key = ?
-    `);
-        return stmt.get(category, key);
+    `, [category, key]);
     }
     getPreferencesByCategory(category) {
-        const stmt = this.db.prepare(`
+        return this.queryAll(`
       SELECT * FROM preferences WHERE category = ? ORDER BY key
-    `);
-        return stmt.all(category);
+    `, [category]);
     }
     getAllPreferences() {
-        const stmt = this.db.prepare(`
+        return this.queryAll(`
       SELECT * FROM preferences ORDER BY category, key
     `);
-        return stmt.all();
     }
     // Discovery methods
     addDiscovery(discovery) {
-        this.ensureWritable();
         this.pruneIfNeeded();
-        const stmt = this.db.prepare(`
+        this.db.run(`
       INSERT INTO discoveries (category, name, location, description, metadata, confidence)
       VALUES (?, ?, ?, ?, ?, ?)
-    `);
-        const result = stmt.run(this.truncateField(discovery.category, 'category'), this.truncateField(discovery.name, 'name'), this.truncateField(discovery.location, 'location'), this.truncateField(discovery.description, 'description'), this.truncateField(discovery.metadata, 'metadata'), discovery.confidence || 1.0);
-        return result.lastInsertRowid;
+    `, [
+            this.truncateField(discovery.category, 'category'),
+            this.truncateField(discovery.name, 'name'),
+            this.truncateField(discovery.location, 'location'),
+            this.truncateField(discovery.description, 'description'),
+            this.truncateField(discovery.metadata, 'metadata'),
+            discovery.confidence || 1.0
+        ]);
+        const id = this.getLastInsertRowId();
+        this.save();
+        return id;
     }
     searchDiscoveries(query) {
-        const stmt = this.db.prepare(`
+        const pattern = `%${query}%`;
+        return this.queryAll(`
       SELECT * FROM discoveries
       WHERE name LIKE ? OR description LIKE ? OR location LIKE ?
       ORDER BY discovered_at DESC
       LIMIT 50
-    `);
-        const pattern = `%${query}%`;
-        return stmt.all(pattern, pattern, pattern);
+    `, [pattern, pattern, pattern]);
     }
     getDiscoveriesByCategory(category) {
-        const stmt = this.db.prepare(`
+        return this.queryAll(`
       SELECT * FROM discoveries WHERE category = ? ORDER BY name
-    `);
-        return stmt.all(category);
+    `, [category]);
     }
     // Entity methods
     upsertEntity(entity) {
-        this.ensureWritable();
-        const stmt = this.db.prepare(`
+        this.db.run(`
       INSERT OR REPLACE INTO entities (name, description, relationships, attributes, location, updated_at)
       VALUES (?, ?, ?, ?, ?, datetime('now'))
-    `);
-        stmt.run(this.truncateField(entity.name, 'name'), this.truncateField(entity.description, 'description'), this.truncateField(entity.relationships, 'relationships'), this.truncateField(entity.attributes, 'attributes'), this.truncateField(entity.location, 'location'));
+    `, [
+            this.truncateField(entity.name, 'name'),
+            this.truncateField(entity.description, 'description'),
+            this.truncateField(entity.relationships, 'relationships'),
+            this.truncateField(entity.attributes, 'attributes'),
+            this.truncateField(entity.location, 'location')
+        ]);
+        this.save();
     }
     getEntity(name) {
-        const stmt = this.db.prepare(`SELECT * FROM entities WHERE name = ?`);
-        return stmt.get(name);
+        return this.queryOne(`SELECT * FROM entities WHERE name = ?`, [name]);
     }
     getAllEntities() {
-        const stmt = this.db.prepare(`SELECT * FROM entities ORDER BY name`);
-        return stmt.all();
+        return this.queryAll(`SELECT * FROM entities ORDER BY name`);
     }
     // Session methods
     startSession() {
-        this.ensureWritable();
-        const stmt = this.db.prepare(`INSERT INTO sessions (started_at) VALUES (datetime('now'))`);
-        const result = stmt.run();
-        return result.lastInsertRowid;
+        this.db.run(`INSERT INTO sessions (started_at) VALUES (datetime('now'))`);
+        const id = this.getLastInsertRowId();
+        this.save();
+        return id;
     }
     endSession(sessionId, summary, workInProgress, nextSteps, keyFiles, tags) {
-        this.ensureWritable();
         this.pruneIfNeeded();
-        const stmt = this.db.prepare(`
+        this.db.run(`
       UPDATE sessions
       SET ended_at = datetime('now'),
           summary = ?,
@@ -344,44 +381,50 @@ export class MemoryDatabase {
           key_files = ?,
           tags = ?
       WHERE id = ?
-    `);
-        stmt.run(this.truncateField(summary, 'summary'), this.truncateField(workInProgress, 'work_in_progress'), this.truncateField(nextSteps, 'next_steps'), keyFiles ? this.truncateField(JSON.stringify(keyFiles), 'key_files') : null, tags ? tags.join(',') : null, sessionId);
+    `, [
+            this.truncateField(summary, 'summary'),
+            this.truncateField(workInProgress, 'work_in_progress'),
+            this.truncateField(nextSteps, 'next_steps'),
+            keyFiles ? this.truncateField(JSON.stringify(keyFiles), 'key_files') : null,
+            tags ? tags.join(',') : null,
+            sessionId
+        ]);
+        this.save();
     }
     getLastSession() {
-        const stmt = this.db.prepare(`
+        return this.queryOne(`
       SELECT * FROM sessions ORDER BY started_at DESC LIMIT 1
     `);
-        return stmt.get();
     }
     getCurrentSession() {
-        const stmt = this.db.prepare(`
+        return this.queryOne(`
       SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1
     `);
-        return stmt.get();
     }
     // Open questions methods
     addQuestion(question, context) {
-        this.ensureWritable();
-        const stmt = this.db.prepare(`
+        this.db.run(`
       INSERT INTO open_questions (question, context) VALUES (?, ?)
-    `);
-        const result = stmt.run(this.truncateField(question, 'question'), this.truncateField(context, 'context'));
-        return result.lastInsertRowid;
+    `, [
+            this.truncateField(question, 'question'),
+            this.truncateField(context, 'context')
+        ]);
+        const id = this.getLastInsertRowId();
+        this.save();
+        return id;
     }
     resolveQuestion(id, resolution) {
-        this.ensureWritable();
-        const stmt = this.db.prepare(`
+        this.db.run(`
       UPDATE open_questions
       SET status = 'resolved', resolution = ?, resolved_at = datetime('now')
       WHERE id = ?
-    `);
-        stmt.run(resolution, id);
+    `, [resolution, id]);
+        this.save();
     }
     getOpenQuestions() {
-        const stmt = this.db.prepare(`
+        return this.queryAll(`
       SELECT * FROM open_questions WHERE status = 'open' ORDER BY created_at DESC
     `);
-        return stmt.all();
     }
     // General search
     search(query) {
@@ -397,6 +440,7 @@ export class MemoryDatabase {
         return this.dbPath;
     }
     close() {
+        this.save();
         this.db.close();
     }
 }
