@@ -224,6 +224,67 @@ Summaries of work sessions for continuity.
 ### Open Questions
 Unresolved blockers or questions to address.
 
+## Hooks Integration
+
+Pensieve includes a CLI that integrates with Claude Code's hooks system for automatic context preservation.
+
+### Quick Setup
+
+Copy the example hooks configuration:
+
+```bash
+cp node_modules/@esparkman/pensieve/hooks/settings.json ~/.claude/settings.json
+```
+
+Or add to your existing settings:
+
+```json
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "auto",
+        "hooks": [{ "type": "command", "command": "npx @esparkman/pensieve auto-save" }]
+      },
+      {
+        "matcher": "manual",
+        "hooks": [{ "type": "command", "command": "npx @esparkman/pensieve auto-save" }]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [{ "type": "command", "command": "npx @esparkman/pensieve load-context" }]
+      },
+      {
+        "matcher": "resume",
+        "hooks": [{ "type": "command", "command": "npx @esparkman/pensieve load-context" }]
+      }
+    ]
+  }
+}
+```
+
+### CLI Commands
+
+| Command | Purpose |
+|---------|---------|
+| `pensieve auto-save` | Save session snapshot (for PreCompact hooks) |
+| `pensieve load-context` | Output last session context to stdout |
+| `pensieve status` | Show database location and counts |
+
+### CLI Options
+
+```bash
+# Auto-save with custom summary
+pensieve auto-save --summary "Completed auth feature" --wip "Testing in progress"
+
+# Load context as JSON
+pensieve load-context --format json
+```
+
+See [hooks/README.md](hooks/README.md) for detailed configuration options.
+
 ## Development
 
 ```bash
