@@ -368,6 +368,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           } else {
             result = 'No preferences found.';
           }
+        } else if (type === 'discoveries') {
+          const discoveries = category ? db.getDiscoveriesByCategory(category) : db.getAllDiscoveries();
+          if (discoveries.length > 0) {
+            result = `## Discoveries${category ? ` (${category})` : ''}\n\n`;
+            discoveries.forEach(d => {
+              result += `- **${d.name}** [${d.category}]: ${d.description || 'No description'}${d.location ? ` (${d.location})` : ''}\n`;
+            });
+          } else {
+            result = 'No discoveries found.';
+          }
         } else if (type === 'questions') {
           const questions = db.getOpenQuestions();
           if (questions.length > 0) {
@@ -490,6 +500,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           result += '\n';
         }
 
+        const discoveries = db.getRecentDiscoveries(5);
+        if (discoveries.length > 0) {
+          result += `### Recent Discoveries\n`;
+          discoveries.forEach(d => {
+            result += `- **${d.name}** [${d.category}]: ${d.description || 'No description'}${d.location ? ` (${d.location})` : ''}\n`;
+          });
+          result += '\n';
+        }
+
         const questions = db.getOpenQuestions();
         if (questions.length > 0) {
           result += `### Open Questions\n`;
@@ -551,6 +570,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'pensieve_status': {
         const decisions = db.getRecentDecisions(100);
         const prefs = db.getAllPreferences();
+        const discoveries = db.getAllDiscoveries();
         const entities = db.getAllEntities();
         const questions = db.getOpenQuestions();
         const lastSession = db.getLastSession();
@@ -560,6 +580,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         result += `**Counts:**\n`;
         result += `- Decisions: ${decisions.length}\n`;
         result += `- Preferences: ${prefs.length}\n`;
+        result += `- Discoveries: ${discoveries.length}\n`;
         result += `- Entities: ${entities.length}\n`;
         result += `- Open Questions: ${questions.length}\n`;
         result += `- Last Session: ${lastSession ? lastSession.started_at : 'None'}\n`;
@@ -646,9 +667,10 @@ function outputPriorContext(): void {
   const lastSession = db.getLastSession();
   const decisions = db.getRecentDecisions(5);
   const prefs = db.getAllPreferences();
+  const discoveries = db.getRecentDiscoveries(5);
   const questions = db.getOpenQuestions();
 
-  const hasContent = lastSession?.summary || decisions.length > 0 || prefs.length > 0 || questions.length > 0;
+  const hasContent = lastSession?.summary || decisions.length > 0 || prefs.length > 0 || discoveries.length > 0 || questions.length > 0;
 
   if (!hasContent) {
     console.error('🧙 Pensieve ready (no prior context yet)');
@@ -689,6 +711,14 @@ function outputPriorContext(): void {
     console.error('⚙️  PREFERENCES:');
     prefs.forEach(p => {
       console.error(`   • ${p.category}/${p.key}: ${p.value}`);
+    });
+  }
+
+  if (discoveries.length > 0) {
+    console.error('');
+    console.error('🔍 DISCOVERIES:');
+    discoveries.forEach(d => {
+      console.error(`   • [${d.category}] ${d.name}${d.location ? ` at ${d.location}` : ''}`);
     });
   }
 

@@ -447,6 +447,18 @@ export class MemoryDatabase {
     `, [category]);
   }
 
+  getAllDiscoveries(): Discovery[] {
+    return this.queryAll<Discovery>(`
+      SELECT * FROM discoveries ORDER BY discovered_at DESC
+    `);
+  }
+
+  getRecentDiscoveries(limit: number = 10): Discovery[] {
+    return this.queryAll<Discovery>(`
+      SELECT * FROM discoveries ORDER BY discovered_at DESC LIMIT ?
+    `, [limit]);
+  }
+
   // Entity methods
   upsertEntity(entity: Entity): void {
     this.db.run(`

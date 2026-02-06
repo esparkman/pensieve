@@ -106,6 +106,8 @@ export declare class MemoryDatabase {
     addDiscovery(discovery: Discovery): number;
     searchDiscoveries(query: string): Discovery[];
     getDiscoveriesByCategory(category: string): Discovery[];
+    getAllDiscoveries(): Discovery[];
+    getRecentDiscoveries(limit?: number): Discovery[];
     upsertEntity(entity: Entity): void;
     getEntity(name: string): Entity | undefined;
     getAllEntities(): Entity[];
