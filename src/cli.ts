@@ -20,7 +20,7 @@ async function runCLI() {
   program
     .name('pensieve')
     .description('Persistent memory CLI for Claude Code')
-    .version('0.2.1');
+    .version('0.4.0');
 
   program
     .command('auto-save')
@@ -165,10 +165,8 @@ async function runCLI() {
       try {
         const db = await MemoryDatabase.create();
 
-        const decisions = db.getRecentDecisions(1000);
+        const stats = db.getMemoryStats();
         const prefs = db.getAllPreferences();
-        const entities = db.getAllEntities();
-        const questions = db.getOpenQuestions();
         const lastSession = db.getLastSession();
 
         console.log('Pensieve Status');
@@ -176,10 +174,11 @@ async function runCLI() {
         console.log(`Database: ${db.getPath()}`);
         console.log('');
         console.log('Counts:');
-        console.log(`  Decisions:      ${decisions.length}`);
+        console.log(`  Decisions:      ${stats.decisions.active} active, ${stats.decisions.archived} archived`);
         console.log(`  Preferences:    ${prefs.length}`);
-        console.log(`  Entities:       ${entities.length}`);
-        console.log(`  Open Questions: ${questions.length}`);
+        console.log(`  Discoveries:    ${stats.discoveries.active} active, ${stats.discoveries.archived} archived`);
+        console.log(`  Entities:       ${stats.entities.active} active, ${stats.entities.archived} archived`);
+        console.log(`  Open Questions: ${stats.open_questions.active} active, ${stats.open_questions.archived} archived`);
         console.log('');
         if (lastSession) {
           console.log('Last Session:');
@@ -191,6 +190,106 @@ async function runCLI() {
         } else {
           console.log('No sessions recorded yet.');
         }
+
+        db.close();
+        process.exit(0);
+      } catch (error) {
+        console.error(`[Pensieve] Error: ${error instanceof Error ? error.message : String(error)}`);
+        process.exit(1);
+      }
+    });
+
+  program
+    .command('archive')
+    .description('Archive (soft-delete) old memory entries')
+    .option('-d, --days <number>', 'Archive entries older than N days', parseInt)
+    .option('-t, --tables <tables...>', 'Tables to operate on (decisions, discoveries, entities, open_questions)')
+    .option('--list', 'Show archived entry counts')
+    .option('--restore-all', 'Restore all archived entries')
+    .action(async (options) => {
+      try {
+        const db = await MemoryDatabase.create();
+
+        if (options.list) {
+          const stats = db.getMemoryStats();
+          console.log('Archived Entries');
+          console.log('================');
+          console.log(`  Decisions:      ${stats.decisions.archived}`);
+          console.log(`  Discoveries:    ${stats.discoveries.archived}`);
+          console.log(`  Entities:       ${stats.entities.archived}`);
+          console.log(`  Open Questions: ${stats.open_questions.archived}`);
+          db.close();
+          process.exit(0);
+          return;
+        }
+
+        if (options.restoreAll) {
+          const results = db.restoreAll(options.tables);
+          const total = results.reduce((sum: number, r: any) => sum + r.affected, 0);
+          console.log(`Restored ${total} archived entries:`);
+          results.forEach((r: any) => console.log(`  - ${r.table}: ${r.affected}`));
+          db.close();
+          process.exit(0);
+          return;
+        }
+
+        if (options.days === undefined) {
+          console.error('Error: Provide --days, --list, or --restore-all');
+          process.exit(1);
+          return;
+        }
+
+        const results = db.archiveOlderThan(options.days, options.tables);
+        const total = results.reduce((sum: number, r: any) => sum + r.affected, 0);
+        console.log(`Archived ${total} entries older than ${options.days} days:`);
+        results.forEach((r: any) => console.log(`  - ${r.table}: ${r.affected}`));
+
+        db.close();
+        process.exit(0);
+      } catch (error) {
+        console.error(`[Pensieve] Error: ${error instanceof Error ? error.message : String(error)}`);
+        process.exit(1);
+      }
+    });
+
+  program
+    .command('prune')
+    .description('Permanently delete old memory entries')
+    .option('-d, --days <number>', 'Delete entries older than N days', parseInt)
+    .option('-t, --tables <tables...>', 'Tables to operate on (decisions, discoveries, entities, open_questions)')
+    .option('--archived-only', 'Only delete archived entries')
+    .option('--purge-archived', 'Delete all archived entries')
+    .option('-y, --yes', 'Confirm destructive operation (required)')
+    .action(async (options) => {
+      try {
+        if (!options.yes) {
+          console.error('Error: Add --yes to confirm. This permanently deletes data.');
+          process.exit(1);
+          return;
+        }
+
+        const db = await MemoryDatabase.create();
+
+        if (options.purgeArchived) {
+          const results = db.purgeArchived(options.tables);
+          const total = results.reduce((sum: number, r: any) => sum + r.affected, 0);
+          console.log(`Permanently deleted ${total} archived entries:`);
+          results.forEach((r: any) => console.log(`  - ${r.table}: ${r.affected}`));
+          db.close();
+          process.exit(0);
+          return;
+        }
+
+        if (options.days === undefined) {
+          console.error('Error: Provide --days or --purge-archived');
+          process.exit(1);
+          return;
+        }
+
+        const results = db.pruneOlderThan(options.days, options.tables, options.archivedOnly);
+        const total = results.reduce((sum: number, r: any) => sum + r.affected, 0);
+        console.log(`Permanently deleted ${total} entries older than ${options.days} days${options.archivedOnly ? ' (archived only)' : ''}:`);
+        results.forEach((r: any) => console.log(`  - ${r.table}: ${r.affected}`));
 
         db.close();
         process.exit(0);

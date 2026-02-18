@@ -23,6 +23,7 @@ export interface Decision {
   alternatives?: string;
   decided_at?: string;
   source?: string;
+  archived_at?: string | null;
 }
 
 export interface Preference {
@@ -43,6 +44,7 @@ export interface Discovery {
   metadata?: string;
   discovered_at?: string;
   confidence?: number;
+  archived_at?: string | null;
 }
 
 export interface Entity {
@@ -53,6 +55,7 @@ export interface Entity {
   attributes?: string;
   location?: string;
   updated_at?: string;
+  archived_at?: string | null;
 }
 
 export interface Session {
@@ -74,11 +77,32 @@ export interface OpenQuestion {
   resolution?: string;
   created_at?: string;
   resolved_at?: string;
+  archived_at?: string | null;
+}
+
+export interface ArchiveStats {
+  table: string;
+  affected: number;
+}
+
+export interface MemoryStats {
+  decisions: { active: number; archived: number };
+  discoveries: { active: number; archived: number };
+  entities: { active: number; archived: number };
+  open_questions: { active: number; archived: number };
 }
 
 export class MemoryDatabase {
   private db: SqlJsDatabase;
   private dbPath: string;
+
+  private static readonly ARCHIVABLE_TABLES = ['decisions', 'discoveries', 'entities', 'open_questions'];
+  private static readonly TABLE_DATE_COLUMNS: Record<string, string> = {
+    decisions: 'decided_at',
+    discoveries: 'discovered_at',
+    entities: 'updated_at',
+    open_questions: 'created_at',
+  };
 
   private constructor(db: SqlJsDatabase, dbPath: string) {
     this.db = db;
@@ -191,7 +215,7 @@ export class MemoryDatabase {
     `);
 
     // Prune excess decisions (keep most recent)
-    const decisionResult = this.db.exec('SELECT COUNT(*) as count FROM decisions');
+    const decisionResult = this.db.exec('SELECT COUNT(*) as count FROM decisions WHERE archived_at IS NULL');
     const decisionCount = decisionResult.length > 0 ? decisionResult[0].values[0][0] as number : 0;
     if (decisionCount > LIMITS.MAX_DECISIONS) {
       const excess = decisionCount - LIMITS.MAX_DECISIONS;
@@ -204,7 +228,7 @@ export class MemoryDatabase {
     }
 
     // Prune excess discoveries
-    const discoveryResult = this.db.exec('SELECT COUNT(*) as count FROM discoveries');
+    const discoveryResult = this.db.exec('SELECT COUNT(*) as count FROM discoveries WHERE archived_at IS NULL');
     const discoveryCount = discoveryResult.length > 0 ? discoveryResult[0].values[0][0] as number : 0;
     if (discoveryCount > LIMITS.MAX_DISCOVERIES) {
       const excess = discoveryCount - LIMITS.MAX_DISCOVERIES;
@@ -307,6 +331,22 @@ export class MemoryDatabase {
     this.db.run('CREATE INDEX IF NOT EXISTS idx_preferences_category ON preferences(category)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_open_questions_status ON open_questions(status)');
+
+    this.migrateSchema();
+  }
+
+  private migrateSchema(): void {
+    for (const table of MemoryDatabase.ARCHIVABLE_TABLES) {
+      const result = this.db.exec(`PRAGMA table_info(${table})`);
+      const columns = result.length > 0 ? result[0].values.map(row => row[1] as string) : [];
+
+      if (!columns.includes('archived_at')) {
+        this.db.run(`ALTER TABLE ${table} ADD COLUMN archived_at TEXT DEFAULT NULL`);
+        console.error(`[Pensieve] Migration: Added archived_at column to ${table}`);
+      }
+
+      this.db.run(`CREATE INDEX IF NOT EXISTS idx_${table}_archived ON ${table}(archived_at)`);
+    }
   }
 
   /**
@@ -364,7 +404,8 @@ export class MemoryDatabase {
     const pattern = `%${query}%`;
     return this.queryAll<Decision>(`
       SELECT * FROM decisions
-      WHERE topic LIKE ? OR decision LIKE ? OR rationale LIKE ?
+      WHERE (topic LIKE ? OR decision LIKE ? OR rationale LIKE ?)
+        AND archived_at IS NULL
       ORDER BY decided_at DESC
       LIMIT 50
     `, [pattern, pattern, pattern]);
@@ -373,6 +414,7 @@ export class MemoryDatabase {
   getRecentDecisions(limit: number = 10): Decision[] {
     return this.queryAll<Decision>(`
       SELECT * FROM decisions
+      WHERE archived_at IS NULL
       ORDER BY decided_at DESC
       LIMIT ?
     `, [limit]);
@@ -435,7 +477,8 @@ export class MemoryDatabase {
     const pattern = `%${query}%`;
     return this.queryAll<Discovery>(`
       SELECT * FROM discoveries
-      WHERE name LIKE ? OR description LIKE ? OR location LIKE ?
+      WHERE (name LIKE ? OR description LIKE ? OR location LIKE ?)
+        AND archived_at IS NULL
       ORDER BY discovered_at DESC
       LIMIT 50
     `, [pattern, pattern, pattern]);
@@ -443,19 +486,19 @@ export class MemoryDatabase {
 
   getDiscoveriesByCategory(category: string): Discovery[] {
     return this.queryAll<Discovery>(`
-      SELECT * FROM discoveries WHERE category = ? ORDER BY name
+      SELECT * FROM discoveries WHERE category = ? AND archived_at IS NULL ORDER BY name
     `, [category]);
   }
 
   getAllDiscoveries(): Discovery[] {
     return this.queryAll<Discovery>(`
-      SELECT * FROM discoveries ORDER BY discovered_at DESC
+      SELECT * FROM discoveries WHERE archived_at IS NULL ORDER BY discovered_at DESC
     `);
   }
 
   getRecentDiscoveries(limit: number = 10): Discovery[] {
     return this.queryAll<Discovery>(`
-      SELECT * FROM discoveries ORDER BY discovered_at DESC LIMIT ?
+      SELECT * FROM discoveries WHERE archived_at IS NULL ORDER BY discovered_at DESC LIMIT ?
     `, [limit]);
   }
 
@@ -475,11 +518,11 @@ export class MemoryDatabase {
   }
 
   getEntity(name: string): Entity | undefined {
-    return this.queryOne<Entity>(`SELECT * FROM entities WHERE name = ?`, [name]);
+    return this.queryOne<Entity>(`SELECT * FROM entities WHERE name = ? AND archived_at IS NULL`, [name]);
   }
 
   getAllEntities(): Entity[] {
-    return this.queryAll<Entity>(`SELECT * FROM entities ORDER BY name`);
+    return this.queryAll<Entity>(`SELECT * FROM entities WHERE archived_at IS NULL ORDER BY name`);
   }
 
   // Session methods
@@ -550,7 +593,7 @@ export class MemoryDatabase {
 
   getOpenQuestions(): OpenQuestion[] {
     return this.queryAll<OpenQuestion>(`
-      SELECT * FROM open_questions WHERE status = 'open' ORDER BY created_at DESC
+      SELECT * FROM open_questions WHERE status = 'open' AND archived_at IS NULL ORDER BY created_at DESC
     `);
   }
 
@@ -564,6 +607,148 @@ export class MemoryDatabase {
         e.description?.toLowerCase().includes(query.toLowerCase())
       )
     };
+  }
+
+  // Archive & prune methods
+
+  private validateTables(tables?: string[]): string[] {
+    const target = tables || MemoryDatabase.ARCHIVABLE_TABLES;
+    for (const t of target) {
+      if (!MemoryDatabase.ARCHIVABLE_TABLES.includes(t)) {
+        throw new Error(`Invalid table: ${t}. Must be one of: ${MemoryDatabase.ARCHIVABLE_TABLES.join(', ')}`);
+      }
+    }
+    return target;
+  }
+
+  archiveOlderThan(days: number, tables?: string[]): ArchiveStats[] {
+    const target = this.validateTables(tables);
+    const results: ArchiveStats[] = [];
+
+    for (const table of target) {
+      const dateCol = MemoryDatabase.TABLE_DATE_COLUMNS[table];
+      this.db.run(`
+        UPDATE ${table}
+        SET archived_at = datetime('now')
+        WHERE archived_at IS NULL
+          AND datetime(${dateCol}) < datetime('now', '-${days} days')
+      `);
+      const changes = this.db.getRowsModified();
+      results.push({ table, affected: changes });
+    }
+
+    this.save();
+    return results;
+  }
+
+  archiveByIds(table: string, ids: number[]): number {
+    this.validateTables([table]);
+    if (ids.length === 0) return 0;
+
+    const placeholders = ids.map(() => '?').join(',');
+    this.db.run(`
+      UPDATE ${table}
+      SET archived_at = datetime('now')
+      WHERE id IN (${placeholders}) AND archived_at IS NULL
+    `, ids as SqlValue[]);
+
+    const changes = this.db.getRowsModified();
+    this.save();
+    return changes;
+  }
+
+  restoreByIds(table: string, ids: number[]): number {
+    this.validateTables([table]);
+    if (ids.length === 0) return 0;
+
+    const placeholders = ids.map(() => '?').join(',');
+    this.db.run(`
+      UPDATE ${table}
+      SET archived_at = NULL
+      WHERE id IN (${placeholders}) AND archived_at IS NOT NULL
+    `, ids as SqlValue[]);
+
+    const changes = this.db.getRowsModified();
+    this.save();
+    return changes;
+  }
+
+  restoreAll(tables?: string[]): ArchiveStats[] {
+    const target = this.validateTables(tables);
+    const results: ArchiveStats[] = [];
+
+    for (const table of target) {
+      this.db.run(`UPDATE ${table} SET archived_at = NULL WHERE archived_at IS NOT NULL`);
+      const changes = this.db.getRowsModified();
+      results.push({ table, affected: changes });
+    }
+
+    this.save();
+    return results;
+  }
+
+  pruneOlderThan(days: number, tables?: string[], archivedOnly: boolean = false): ArchiveStats[] {
+    const target = this.validateTables(tables);
+    const results: ArchiveStats[] = [];
+
+    for (const table of target) {
+      const dateCol = MemoryDatabase.TABLE_DATE_COLUMNS[table];
+      const archivedFilter = archivedOnly ? ' AND archived_at IS NOT NULL' : '';
+      this.db.run(`
+        DELETE FROM ${table}
+        WHERE datetime(${dateCol}) < datetime('now', '-${days} days')${archivedFilter}
+      `);
+      const changes = this.db.getRowsModified();
+      results.push({ table, affected: changes });
+    }
+
+    this.save();
+    return results;
+  }
+
+  purgeArchived(tables?: string[]): ArchiveStats[] {
+    const target = this.validateTables(tables);
+    const results: ArchiveStats[] = [];
+
+    for (const table of target) {
+      this.db.run(`DELETE FROM ${table} WHERE archived_at IS NOT NULL`);
+      const changes = this.db.getRowsModified();
+      results.push({ table, affected: changes });
+    }
+
+    this.save();
+    return results;
+  }
+
+  getMemoryStats(): MemoryStats {
+    const stats: Record<string, { active: number; archived: number }> = {};
+
+    for (const table of MemoryDatabase.ARCHIVABLE_TABLES) {
+      const result = this.db.exec(`
+        SELECT
+          SUM(CASE WHEN archived_at IS NULL THEN 1 ELSE 0 END) as active,
+          SUM(CASE WHEN archived_at IS NOT NULL THEN 1 ELSE 0 END) as archived
+        FROM ${table}
+      `);
+
+      if (result.length > 0 && result[0].values.length > 0) {
+        stats[table] = {
+          active: (result[0].values[0][0] as number) || 0,
+          archived: (result[0].values[0][1] as number) || 0,
+        };
+      } else {
+        stats[table] = { active: 0, archived: 0 };
+      }
+    }
+
+    return stats as unknown as MemoryStats;
+  }
+
+  getArchivedEntries<T>(table: string): T[] {
+    this.validateTables([table]);
+    return this.queryAll<T>(`
+      SELECT * FROM ${table} WHERE archived_at IS NOT NULL ORDER BY archived_at DESC
+    `);
   }
 
   // Get database path for debugging

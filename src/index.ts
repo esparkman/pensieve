@@ -6,7 +6,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { MemoryDatabase, LIMITS } from './database.js';
+import { MemoryDatabase, LIMITS, type ArchiveStats } from './database.js';
 import { checkFieldsForSecrets, formatSecretWarning } from './security.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -191,6 +191,72 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: 'object',
           properties: {}
+        }
+      },
+      {
+        name: 'pensieve_archive',
+        description: 'Archive (soft-delete) or restore memory entries. Archived entries are hidden from context but can be restored.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: {
+              type: 'string',
+              enum: ['archive', 'restore', 'list_archived'],
+              description: 'The action to perform'
+            },
+            older_than_days: {
+              type: 'number',
+              description: 'Archive entries older than this many days (used with action=archive)'
+            },
+            table: {
+              type: 'string',
+              enum: ['decisions', 'discoveries', 'entities', 'open_questions'],
+              description: 'Target table for id-based operations'
+            },
+            ids: {
+              type: 'array',
+              items: { type: 'number' },
+              description: 'Specific entry IDs to archive or restore'
+            },
+            tables: {
+              type: 'array',
+              items: { type: 'string', enum: ['decisions', 'discoveries', 'entities', 'open_questions'] },
+              description: 'Tables to operate on (defaults to all)'
+            }
+          },
+          required: ['action']
+        }
+      },
+      {
+        name: 'pensieve_prune',
+        description: 'Permanently delete memory entries. This is irreversible.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: {
+              type: 'string',
+              enum: ['prune', 'purge_archived'],
+              description: 'prune: delete by age, purge_archived: delete all archived entries'
+            },
+            older_than_days: {
+              type: 'number',
+              description: 'Delete entries older than this many days (required for action=prune)'
+            },
+            tables: {
+              type: 'array',
+              items: { type: 'string', enum: ['decisions', 'discoveries', 'entities', 'open_questions'] },
+              description: 'Tables to operate on (defaults to all)'
+            },
+            archived_only: {
+              type: 'boolean',
+              description: 'Only delete archived entries (used with action=prune)'
+            },
+            confirm: {
+              type: 'boolean',
+              description: 'Must be true to proceed — safety guard for destructive operations'
+            }
+          },
+          required: ['action', 'confirm']
         }
       }
     ]
@@ -568,24 +634,120 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'pensieve_status': {
-        const decisions = db.getRecentDecisions(100);
+        const stats = db.getMemoryStats();
         const prefs = db.getAllPreferences();
-        const discoveries = db.getAllDiscoveries();
-        const entities = db.getAllEntities();
-        const questions = db.getOpenQuestions();
         const lastSession = db.getLastSession();
 
         let result = `## Memory Status\n\n`;
         result += `**Database:** ${db.getPath()}\n\n`;
         result += `**Counts:**\n`;
-        result += `- Decisions: ${decisions.length}\n`;
+        result += `- Decisions: ${stats.decisions.active} active, ${stats.decisions.archived} archived\n`;
         result += `- Preferences: ${prefs.length}\n`;
-        result += `- Discoveries: ${discoveries.length}\n`;
-        result += `- Entities: ${entities.length}\n`;
-        result += `- Open Questions: ${questions.length}\n`;
+        result += `- Discoveries: ${stats.discoveries.active} active, ${stats.discoveries.archived} archived\n`;
+        result += `- Entities: ${stats.entities.active} active, ${stats.entities.archived} archived\n`;
+        result += `- Open Questions: ${stats.open_questions.active} active, ${stats.open_questions.archived} archived\n`;
         result += `- Last Session: ${lastSession ? lastSession.started_at : 'None'}\n`;
 
         return { content: [{ type: 'text', text: result }] };
+      }
+
+      case 'pensieve_archive': {
+        const { action, older_than_days, table, ids, tables } = args as {
+          action: string;
+          older_than_days?: number;
+          table?: string;
+          ids?: number[];
+          tables?: string[];
+        };
+
+        switch (action) {
+          case 'archive': {
+            if (older_than_days !== undefined) {
+              const results = db.archiveOlderThan(older_than_days, tables);
+              const total = results.reduce((sum, r) => sum + r.affected, 0);
+              let text = `Archived ${total} entries older than ${older_than_days} days:\n`;
+              results.forEach(r => { text += `  - ${r.table}: ${r.affected}\n`; });
+              return { content: [{ type: 'text', text }] };
+            } else if (table && ids?.length) {
+              const count = db.archiveByIds(table, ids);
+              return { content: [{ type: 'text', text: `Archived ${count} entries from ${table}` }] };
+            }
+            return { content: [{ type: 'text', text: 'Error: Provide older_than_days or (table + ids) for archive action' }] };
+          }
+          case 'restore': {
+            if (table && ids?.length) {
+              const count = db.restoreByIds(table, ids);
+              return { content: [{ type: 'text', text: `Restored ${count} entries in ${table}` }] };
+            } else {
+              const results = db.restoreAll(tables);
+              const total = results.reduce((sum, r) => sum + r.affected, 0);
+              let text = `Restored ${total} archived entries:\n`;
+              results.forEach(r => { text += `  - ${r.table}: ${r.affected}\n`; });
+              return { content: [{ type: 'text', text }] };
+            }
+          }
+          case 'list_archived': {
+            const targetTables = tables || ['decisions', 'discoveries', 'entities', 'open_questions'];
+            let text = `## Archived Entries\n\n`;
+            let hasEntries = false;
+
+            for (const t of targetTables) {
+              const entries = db.getArchivedEntries<any>(t);
+              if (entries.length > 0) {
+                hasEntries = true;
+                text += `### ${t} (${entries.length})\n`;
+                entries.forEach((e: any) => {
+                  const label = e.topic || e.name || e.question || `#${e.id}`;
+                  text += `- [#${e.id}] ${label} (archived: ${e.archived_at})\n`;
+                });
+                text += '\n';
+              }
+            }
+
+            if (!hasEntries) {
+              text = 'No archived entries found.';
+            }
+            return { content: [{ type: 'text', text }] };
+          }
+          default:
+            return { content: [{ type: 'text', text: `Error: Unknown action "${action}"` }] };
+        }
+      }
+
+      case 'pensieve_prune': {
+        const { action, older_than_days, tables, archived_only, confirm } = args as {
+          action: string;
+          older_than_days?: number;
+          tables?: string[];
+          archived_only?: boolean;
+          confirm: boolean;
+        };
+
+        if (!confirm) {
+          return { content: [{ type: 'text', text: 'Error: Set confirm=true to proceed. This operation permanently deletes data.' }] };
+        }
+
+        switch (action) {
+          case 'prune': {
+            if (older_than_days === undefined) {
+              return { content: [{ type: 'text', text: 'Error: older_than_days is required for prune action' }] };
+            }
+            const results = db.pruneOlderThan(older_than_days, tables, archived_only);
+            const total = results.reduce((sum, r) => sum + r.affected, 0);
+            let text = `Permanently deleted ${total} entries older than ${older_than_days} days${archived_only ? ' (archived only)' : ''}:\n`;
+            results.forEach(r => { text += `  - ${r.table}: ${r.affected}\n`; });
+            return { content: [{ type: 'text', text }] };
+          }
+          case 'purge_archived': {
+            const results = db.purgeArchived(tables);
+            const total = results.reduce((sum, r) => sum + r.affected, 0);
+            let text = `Permanently deleted ${total} archived entries:\n`;
+            results.forEach(r => { text += `  - ${r.table}: ${r.affected}\n`; });
+            return { content: [{ type: 'text', text }] };
+          }
+          default:
+            return { content: [{ type: 'text', text: `Error: Unknown action "${action}"` }] };
+        }
       }
 
       default:

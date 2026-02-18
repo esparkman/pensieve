@@ -15,6 +15,7 @@ export interface Decision {
     alternatives?: string;
     decided_at?: string;
     source?: string;
+    archived_at?: string | null;
 }
 export interface Preference {
     id?: number;
@@ -33,6 +34,7 @@ export interface Discovery {
     metadata?: string;
     discovered_at?: string;
     confidence?: number;
+    archived_at?: string | null;
 }
 export interface Entity {
     id?: number;
@@ -42,6 +44,7 @@ export interface Entity {
     attributes?: string;
     location?: string;
     updated_at?: string;
+    archived_at?: string | null;
 }
 export interface Session {
     id?: number;
@@ -61,10 +64,35 @@ export interface OpenQuestion {
     resolution?: string;
     created_at?: string;
     resolved_at?: string;
+    archived_at?: string | null;
+}
+export interface ArchiveStats {
+    table: string;
+    affected: number;
+}
+export interface MemoryStats {
+    decisions: {
+        active: number;
+        archived: number;
+    };
+    discoveries: {
+        active: number;
+        archived: number;
+    };
+    entities: {
+        active: number;
+        archived: number;
+    };
+    open_questions: {
+        active: number;
+        archived: number;
+    };
 }
 export declare class MemoryDatabase {
     private db;
     private dbPath;
+    private static readonly ARCHIVABLE_TABLES;
+    private static readonly TABLE_DATE_COLUMNS;
     private constructor();
     /**
      * Create a new MemoryDatabase instance (async factory)
@@ -84,6 +112,7 @@ export declare class MemoryDatabase {
      */
     private pruneIfNeeded;
     private initSchema;
+    private migrateSchema;
     /**
      * Get last inserted row ID
      */
@@ -123,6 +152,15 @@ export declare class MemoryDatabase {
         discoveries: Discovery[];
         entities: Entity[];
     };
+    private validateTables;
+    archiveOlderThan(days: number, tables?: string[]): ArchiveStats[];
+    archiveByIds(table: string, ids: number[]): number;
+    restoreByIds(table: string, ids: number[]): number;
+    restoreAll(tables?: string[]): ArchiveStats[];
+    pruneOlderThan(days: number, tables?: string[], archivedOnly?: boolean): ArchiveStats[];
+    purgeArchived(tables?: string[]): ArchiveStats[];
+    getMemoryStats(): MemoryStats;
+    getArchivedEntries<T>(table: string): T[];
     getPath(): string;
     close(): void;
 }
